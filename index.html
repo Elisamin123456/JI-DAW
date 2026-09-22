@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
+  <meta name="color-scheme" content="dark" />
+  <title>纯律和音图 DAW</title>
+  <link rel="icon" href="./favicon.ico" />
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <section id="piano-view" class="view piano-view">
+    <div id="piano-canvas" class="piano-canvas">
+      <svg id="piano-svg" class="piano-svg" xmlns="http://www.w3.org/2000/svg" aria-label="纯律钢琴窗"></svg>
+    </div>
+    <div id="piano-ruler" class="piano-ruler"><div id="piano-ruler-content"></div><i id="piano-ruler-playhead"></i></div>
+
+    <header class="web-header glass">
+      <div class="web-brand"><span class="brand-mark">λ</span><strong>纯律和音图</strong><small>WEB</small></div>
+      <input id="project-name" class="project-name" value="未命名工程" aria-label="工程名称" />
+      <select id="instrument-select" class="web-instrument" aria-label="音色"></select>
+      <nav class="web-actions">
+        <button id="new-project" title="新建空白工程">新建</button>
+        <button id="open-project" title="打开 .jidaw 工程">打开</button>
+        <button id="save-project" title="导出 .jidaw 工程">保存</button>
+        <button id="import-midi" title="导入 MIDI">导入 MIDI</button>
+        <button id="export-midi" title="导出 MIDI">导出 MIDI</button>
+        <button id="import-track-code" title="导入轨道码">导入码</button>
+        <button id="export-track-code" title="导出轨道码">导出码</button>
+        <button id="global-settings" title="全局设置">设置</button>
+      </nav>
+    </header>
+
+    <footer class="piano-toolbar glass">
+      <div class="tool-switch" aria-label="编辑工具">
+        <button id="tool-pen" class="tool-button active" title="笔工具：添加和编辑音符">✎</button>
+        <button id="tool-select" class="tool-button" title="框选工具（按住 Ctrl 临时切换）">□</button>
+        <button id="tool-text" class="tool-button" title="注释工具（T）">T</button>
+      </div>
+      <label class="icon-check" title="连动后续音符"><input id="shift-mode" type="checkbox" /><span>⛓</span></label>
+      <button id="piano-undo" class="toolbar-button" title="撤销">↶</button>
+      <button id="redo-button" class="toolbar-button" title="重做">↷</button>
+      <button id="copy-note" class="toolbar-button" title="复制所选音符（Ctrl+C）">▣</button>
+      <button id="paste-note" class="toolbar-button" title="粘贴到播放光标（Ctrl+V）">▤</button>
+      <span class="toolbar-spacer"></span>
+      <button id="piano-stop" class="transport-circle" title="停止">■</button>
+      <button id="piano-play" class="transport-circle play" title="播放/暂停">▶</button>
+      <button id="piano-loop" class="transport-circle toggle active" title="循环">↻</button>
+      <button id="piano-follow" class="toolbar-button" title="播放锁定">⌖</button>
+      <span id="piano-position" class="piano-position">001:01:000</span>
+      <span class="toolbar-spacer"></span>
+      <label class="web-compact">BPM <input id="bpm-input" type="number" min="20" max="400" value="120"></label>
+      <label class="web-compact">拍号 <select id="signature-select"><option>4/4</option><option>3/4</option><option>5/4</option><option>6/8</option><option>7/8</option></select></label>
+      <label class="web-compact">吸附 <select id="snap-select"><option value="0.25">1/4</option><option value="0.5">1/2</option><option value="1">1</option><option value="2">2</option><option value="0">关</option></select></label>
+      <button id="piano-settings" class="toolbar-button" title="钢琴窗设置">⚙</button>
+    </footer>
+
+    <div id="piano-overlay" class="piano-overlay"></div>
+
+    <article id="root-menu" class="note-menu glass">
+      <div class="note-menu-head">
+        <button class="audition-button" title="试听">▶</button>
+        <span id="root-hz" class="hz-value" contenteditable="plaintext-only">440.000</span><small>Hz</small>
+        <span id="root-note-name" class="note-name">A4</span>
+        <button id="root-copy" class="menu-icon" title="复制">▣</button>
+        <button id="root-delete" class="menu-icon danger" title="删除">×</button>
+      </div>
+      <div class="volume-row"><button id="root-mute" class="mute-button">♪</button><input id="root-volume" type="range" min="0" max="100" value="80" /></div>
+      <div class="menu-divider"></div>
+      <div class="interval-caption">移动音程</div>
+      <div class="fraction-row">
+        <select id="root-move-direction"><option value="up">向上</option><option value="down">向下</option></select>
+        <input id="root-move-numerator" value="3" inputmode="numeric" /><span>/</span><input id="root-move-denominator" value="2" inputmode="numeric" />
+        <button id="root-move-ratio" class="apply-button">移动</button>
+      </div>
+      <div class="ratio-quick" data-target="root-move"><button data-prime="2">2</button><button data-prime="3">3</button><button data-prime="5">5</button><button data-prime="7">7</button><button data-prime="11">11</button><button data-prime="13">13</button></div><div class="ratio-preset-panel" data-for="root-move"></div>
+      <div class="interval-caption second-caption">从此音添加</div>
+      <div class="fraction-row">
+        <select id="root-direction"><option value="up">向上</option><option value="down">向下</option></select>
+        <input id="root-numerator" value="3" inputmode="numeric" /><span>/</span><input id="root-denominator" value="2" inputmode="numeric" />
+        <button id="root-add-ratio" class="apply-button">添加</button>
+      </div>
+      <div class="ratio-quick" data-target="root"><button data-prime="2">2</button><button data-prime="3">3</button><button data-prime="5">5</button><button data-prime="7">7</button><button data-prime="11">11</button><button data-prime="13">13</button></div><div class="ratio-preset-panel" data-for="root"></div>
+    </article>
+
+    <article id="note-menu" class="note-menu glass">
+      <div class="note-menu-head">
+        <button class="audition-button" title="试听">▶</button>
+        <span id="note-hz" class="hz-value">660.000</span><small>Hz</small>
+        <span id="note-name-ratio" class="note-name">E5 · 3/2</span>
+        <button id="note-delete" class="menu-icon danger" title="删除">×</button>
+      </div>
+      <div class="volume-row"><button id="note-mute" class="mute-button">♪</button><input id="note-volume" type="range" min="0" max="100" value="80" /></div>
+      <div class="menu-divider"></div>
+      <div class="interval-caption">移动音程</div>
+      <div class="fraction-row">
+        <select id="note-move-direction"><option value="up">向上</option><option value="down">向下</option></select>
+        <input id="note-move-numerator" value="3" inputmode="numeric" /><span>/</span><input id="note-move-denominator" value="2" inputmode="numeric" />
+        <button id="note-move-ratio" class="apply-button">移动</button>
+      </div>
+      <div class="ratio-quick" data-target="note-move"><button data-prime="2">2</button><button data-prime="3">3</button><button data-prime="5">5</button><button data-prime="7">7</button><button data-prime="11">11</button><button data-prime="13">13</button></div><div class="ratio-preset-panel" data-for="note-move"></div>
+      <div class="interval-caption second-caption">从此音添加</div>
+      <div class="fraction-row compact">
+        <select id="extend-direction"><option value="up">向上</option><option value="down">向下</option></select>
+        <input id="extend-numerator" value="3" inputmode="numeric" /><span>/</span><input id="extend-denominator" value="2" inputmode="numeric" />
+        <button id="note-extend-ratio" class="apply-button">添加</button>
+      </div>
+      <div class="ratio-quick" data-target="note-add"><button data-prime="2">2</button><button data-prime="3">3</button><button data-prime="5">5</button><button data-prime="7">7</button><button data-prime="11">11</button><button data-prime="13">13</button></div><div class="ratio-preset-panel" data-for="note-add"></div>
+    </article>
+
+    <article id="settings-menu" class="settings-menu glass">
+      <header><strong>钢琴窗设置</strong><button class="close-popup menu-icon">×</button></header>
+      <label><span>吸附</span><select id="settings-snap"><option value="0.25">1/4 拍</option><option value="0.5">1/2 拍</option><option value="1">1 拍</option><option value="2">2 拍</option><option value="0">关闭</option></select></label>
+      <label><span>视图</span><button id="settings-reset-view" class="source-picker">复位缩放与位置</button></label>
+    </article>
+
+    <div id="annotation-format" class="annotation-format glass" aria-label="文字格式">
+      <button data-rich-command="bold" title="粗体"><b>B</b></button>
+      <button data-rich-command="italic" title="斜体"><i>I</i></button>
+      <button data-rich-command="underline" title="下划线"><u>U</u></button>
+      <button data-rich-command="strikeThrough" title="删除线"><s>S</s></button>
+      <input id="annotation-color" type="color" value="#ffffff" title="文字颜色" aria-label="文字颜色">
+    </div>
+  </section>
+
+  <div id="global-overlay" class="global-overlay"></div>
+  <article id="global-settings-menu" class="settings-menu global-settings-menu glass">
+    <header><strong>全局设置</strong><button class="close-popup menu-icon">×</button></header>
+    <label><span>BPM</span><input id="global-bpm" inputmode="decimal" /></label>
+    <label><span>拍号</span><select id="global-signature"><option>4/4</option><option>3/4</option><option>5/4</option><option>6/8</option><option>7/8</option></select></label>
+    <label><span>小节数</span><input id="global-bars" type="number" min="4" max="256" /></label>
+    <label><span>时间吸附</span><select id="global-snap"><option value="0.25">1/4 拍</option><option value="0.5">1/2 拍</option><option value="1">1 拍</option><option value="2">2 拍</option><option value="0">关闭</option></select></label>
+    <label><span>轨道音量</span><input id="global-volume" type="range" min="0" max="1.25" step="0.01" /></label>
+    <label><span>轨道静音</span><input id="global-mute" type="checkbox" /></label>
+    <label><span>节拍器</span><input id="global-metronome" type="checkbox" /></label>
+    <label><span>音高吸附</span><button id="global-scale" class="source-picker">主音、调式与比例…</button></label>
+  </article>
+
+  <article id="scale-menu" class="scale-menu glass">
+    <header><div><strong>十二音吸附比例</strong><small>每个音相对所选主音的纯律分数</small></div><button class="close-popup menu-icon">×</button></header>
+    <label class="scale-mode-row"><span>主音</span><select id="scale-tonic">
+      <option value="0">C</option><option value="1">C♯</option><option value="2">D</option><option value="3">E♭</option><option value="4">E</option><option value="5">F</option><option value="6">F♯</option><option value="7">G</option><option value="8">A♭</option><option value="9">A</option><option value="10">B♭</option><option value="11">B</option>
+    </select></label>
+    <label class="scale-mode-row"><span>调式</span><select id="scale-mode">
+      <option value="chromatic">十二音阶</option><option value="ionian">大调</option><option value="dorian">多利亚</option><option value="phrygian">弗里吉亚</option><option value="lydian">利底亚</option><option value="mixolydian">混合利底亚</option><option value="aeolian">小调（自然与旋律）</option><option value="locrian">洛克里亚</option><option value="major-pentatonic">大调五声音阶</option><option value="minor-pentatonic">小调五声音阶</option>
+    </select></label>
+    <div id="scale-ratio-list" class="scale-ratio-list"></div>
+    <footer><button id="scale-reset" class="text-button">按调式重新生成</button><span></span><button id="scale-apply" class="primary-button">应用</button></footer>
+  </article>
+
+  <dialog id="confirm-dialog" class="confirm-dialog glass">
+    <h3 id="confirm-title">请确认</h3><p id="confirm-message"></p>
+    <div><button id="confirm-cancel" class="text-button">取消</button><button id="confirm-ok" class="danger-button">继续</button></div>
+  </dialog>
+  <dialog id="track-code-dialog" class="track-code-dialog glass">
+    <header><strong id="track-code-title">轨道码</strong><button id="track-code-close" class="menu-icon">×</button></header>
+    <textarea id="track-code-value" spellcheck="false"></textarea>
+    <footer><button id="track-code-import" class="primary-button">导入</button><span></span><button id="track-code-copy" class="primary-button">复制</button></footer>
+  </dialog>
+  <div id="toast" class="toast"></div>
+  <input id="fallback-file" class="hidden" type="file" />
+  <script type="module" src="/src/app.ts"></script>
+</body>
+</html>
