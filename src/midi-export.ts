@@ -18,19 +18,19 @@ function chunk(id: string, data: number[]): number[] {
 }
 
 export function exportMidi(project: JiProject): Uint8Array {
-  const track = project.tracks[0]
-  if (!track) throw new Error('没有可导出的轨道')
+  const anySolo = project.tracks.some(track => track.solo)
+  const sourceTracks = project.tracks.filter(track => !track.muted && (!anySolo || track.solo))
+  if (!sourceTracks.length) throw new Error('没有可导出的轨道')
   const events: MidiEvent[] = []
   const add = (tick: number, order: number, ...bytes: number[]) => events.push({ tick, order, bytes })
   const meta = (tick: number, type: number, data: number[]) => add(tick, 0, 0xff, type, ...variableLength(data.length), ...data)
-  meta(0, 0x03, [...new TextEncoder().encode(track.name)])
+  meta(0, 0x03, [...new TextEncoder().encode(project.name)])
   const microseconds = Math.round(60_000_000 / project.bpm)
   meta(0, 0x51, [(microseconds >>> 16) & 255, (microseconds >>> 8) & 255, microseconds & 255])
   const [top, bottom] = project.signature.split('/').map(Number)
   meta(0, 0x58, [top, Math.round(Math.log2(bottom)), 24, 8])
 
-  const states = CHANNELS.map(channel => ({ channel, bend: 8192, active: [] as Array<{ pitch: number; end: number }> }))
-  const program = Math.max(0, Math.min(127, Math.round(track.instrument.programIndex || 0)))
+  const states = CHANNELS.map(channel => ({ channel, bend: 8192, program: -1, active: [] as Array<{ pitch: number; end: number }> }))
   for (const state of states) {
     const channel = state.channel
     // RPN 0：弯音范围设为 ±2 个半音。每个复音通道独立设置。
@@ -40,12 +40,14 @@ export function exportMidi(project: JiProject): Uint8Array {
     add(0, 0, 0xb0 | channel, 38, 0)
     add(0, 0, 0xb0 | channel, 101, 127)
     add(0, 0, 0xb0 | channel, 100, 127)
-    add(0, 0, 0xc0 | channel, program)
   }
 
-  const playable = track.notes.filter(note => !note.ghost && !note.muted && Number.isFinite(note.frequency) && note.frequency > 0)
-    .sort((a, b) => a.beat - b.beat || a.frequency - b.frequency)
-  for (const note of playable) {
+  const playable = sourceTracks.flatMap(track => {
+    const program = Math.max(0, Math.min(127, Math.round(track.instrument.programIndex || 0)))
+    return track.notes.filter(note => !note.ghost && !note.muted && Number.isFinite(note.frequency) && note.frequency > 0)
+      .map(note => ({ note, program }))
+  }).sort((a, b) => a.note.beat - b.note.beat || a.note.frequency - b.note.frequency)
+  for (const { note, program } of playable) {
     const start = Math.max(0, Math.round(note.beat * PPQN))
     const end = Math.max(start + 1, Math.round((note.beat + note.duration) * PPQN))
     const exactPitch = 69 + 12 * Math.log2(note.frequency / 440)
@@ -54,14 +56,18 @@ export function exportMidi(project: JiProject): Uint8Array {
     if (pitch < 0 || pitch > 127) throw new Error('音符超出 MIDI 0–127 音域，无法无损导出')
     const bend = Math.max(0, Math.min(16383, Math.round(8192 + bendSemitones * 4096)))
     for (const state of states) state.active = state.active.filter(item => item.end > start)
-    const state = states.find(item => item.bend === bend && !item.active.some(active => active.pitch === pitch))
+    const state = states.find(item => item.program === program && item.bend === bend && !item.active.some(active => active.pitch === pitch))
       ?? states.find(item => item.active.length === 0)
     if (!state) throw new Error('同时发声且弯音不同的音符超过 15 个，MIDI 1.0 无法完整导出')
+    if (state.program !== program) {
+      add(start, 2, 0xc0 | state.channel, program)
+      state.program = program
+    }
     if (state.bend !== bend) {
-      add(start, 2, 0xe0 | state.channel, bend & 0x7f, bend >>> 7)
+      add(start, 3, 0xe0 | state.channel, bend & 0x7f, bend >>> 7)
       state.bend = bend
     }
-    add(start, 3, 0x90 | state.channel, pitch, Math.max(1, Math.min(127, Math.round(note.velocity * 127))))
+    add(start, 4, 0x90 | state.channel, pitch, Math.max(1, Math.min(127, Math.round(note.velocity * 127))))
     add(end, 1, 0x80 | state.channel, pitch, 0)
     state.active.push({ pitch, end })
   }

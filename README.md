@@ -15,7 +15,9 @@ npm run dev
 npm run build
 ```
 
-入口文件是仓库根目录的 `index.html`。构建产物位于 `dist/`。
+入口文件是仓库根目录可直接部署的 `index.html`，GitHub Pages 无需改目录。`index.source.html` 是开发入口；执行构建后，固定名称的脚本与样式会同步到根目录 `assets/`，完整构建也保留在 `dist/`。
+
+首次打开会载入 `DEMO.jidaw` 并启动交互式教程；右上角 `?` 可随时重新打开教程。浏览器中的后续编辑会自动恢复，不会被 DEMO 覆盖。
 
 ## 文件交换
 

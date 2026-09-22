@@ -131,10 +131,11 @@ function sanitizeProject(raw: unknown): JiProject {
 }
 
 function loadAutosave(): JiProject | null {
-  try { const value = localStorage.getItem('ji-daw-web-autosave-v1'); return value ? sanitizeProject(JSON.parse(value)) : null } catch { return null }
+  try { const value = localStorage.getItem('ji-daw-web-autosave-v2'); return value ? sanitizeProject(JSON.parse(value)) : null } catch { return null }
 }
 
-let project = loadAutosave() ?? makeProject()
+const autosavedProject = loadAutosave()
+let project = autosavedProject ?? makeProject()
 let activeTrackId = project.tracks[0].id
 let selectedNoteId: string | null = null
 let selectedNoteIds = new Set<string>()
@@ -152,6 +153,7 @@ let annotationWasNew = false
 let dirty = false
 let toastTimer = 0
 let clipboardNotes: JiNote[] | null = null
+let tutorialIndex = -1
 const history: string[] = []
 const future: string[] = []
 const view = { offsetX: 80, offsetY: 0, scale: 1 }
@@ -270,7 +272,7 @@ function checkpoint(): void {
   future.length = 0
 }
 function commit(message?: string): void {
-  dirty = true; localStorage.setItem('ji-daw-web-autosave-v1', JSON.stringify(project)); document.title = `● ${project.name} — 纯律和音图 Web`
+  dirty = true; localStorage.setItem('ji-daw-web-autosave-v2', JSON.stringify(project)); document.title = `● ${project.name} — 纯律和音图 Web`
   if (message) toast(message)
 }
 function undo(): void {
@@ -394,6 +396,7 @@ function renderPiano(): void {
   parts.push(`<line id="piano-playhead" class="play-indicator" x1="${screenX(currentBeat)}" y1="0" x2="${screenX(currentBeat)}" y2="${height}"/>`)
   pianoSvg.innerHTML = parts.join('')
   renderPianoRuler()
+  if (tutorialIndex >= 0) requestAnimationFrame(positionTutorialStep)
 }
 
 function centrePiano(track: Track): void {
@@ -656,7 +659,8 @@ async function openProject(): Promise<void> {
     if (dirty && !await confirmAction('打开工程', '打开工程将替换当前未保存的内容。')) return
     const next = sanitizeProject(JSON.parse(await file.text()))
     audio.stop(); project = next; activeTrackId = project.tracks[0].id; selectOnly(null); currentBeat = 0; history.length = 0; future.length = 0; dirty = false
-    centrePiano(activeTrack()); renderAll(); document.title = `${project.name} — 纯律和音图 Web`; toast('工程已打开')
+    closeTutorial(); centrePiano(activeTrack()); renderAll(); document.title = `${project.name} — 纯律和音图 Web`; toast('工程已打开')
+    if (/^DEMO\.jidaw$/i.test(file.name)) requestAnimationFrame(() => startTutorial(true))
   } catch (error) { toast(`打开失败：${error instanceof Error ? error.message : '文件无效'}`, true) }
 }
 
@@ -756,6 +760,79 @@ function confirmAction(title: string, message: string): Promise<boolean> {
     const finish = (value: boolean) => { dialog.close(); $('#confirm-ok').onclick = null; $('#confirm-cancel').onclick = null; resolve(value) }
     $('#confirm-ok').onclick = () => finish(true); $('#confirm-cancel').onclick = () => finish(false)
   })
+}
+
+const TUTORIAL_STEPS = [
+  {
+    target: '.web-brand', title: '欢迎来到单轨纯律钢琴窗',
+    text: '当前已经加载 DEMO.jidaw。教程不会锁住界面；被高亮的控件仍然可以直接操作。'
+  },
+  {
+    target: '[data-note-id]', title: '直接编辑音符',
+    text: '点击演示音符可打开编辑菜单；拖动音符主体可移动，拖动两端可改变起点或时值。菜单中的“移动音程”和“从此音添加”支持任意分数。'
+  },
+  {
+    target: '.tool-switch', title: '笔、框选与注释',
+    text: 'P 是笔工具，V 是框选工具，T 是原位文本注释。按住 Ctrl 会临时切到框选；选择多个音符后可复制、粘贴或 Delete 删除。'
+  },
+  {
+    target: '#piano-ruler', title: '时间与播放位置',
+    text: '点击底部小节尺会移动播放光标，不会添加音符。滚轮以指针为中心缩放，拖动空白区域可平移视图。'
+  },
+  {
+    target: '#piano-play', title: '播放与跟随',
+    text: '使用播放、停止和循环按钮试听。开启旁边的播放锁定后，光标固定在左侧约四分之一处，谱面随播放滚动。'
+  },
+  {
+    target: '#global-settings', title: '完整全局设置',
+    text: '设置中包含 BPM、拍号、小节数、吸附、音量、静音、节拍器，以及主音、调式和十二音纯律比例。底栏也保留了常用节拍设置。'
+  },
+  {
+    target: '.web-actions', title: '工程、轨道码与 MIDI',
+    text: '顶部可以新建、打开和保存工程，导入/导出轨道码与 MIDI。MIDI 导出会使用多通道 Pitch Bend 保存纯律微分音高。点击右侧“?”可随时重新打开教程。'
+  }
+] as const
+
+function positionTutorialStep(): void {
+  if (tutorialIndex < 0) return
+  const step = TUTORIAL_STEPS[tutorialIndex], target = document.querySelector<HTMLElement>(step.target)
+  if (!target) return
+  const rect = target.getBoundingClientRect(), padding = 7, highlight = $('#tutorial-highlight'), card = $('#tutorial-card')
+  const left = clamp(6, rect.left - padding, innerWidth - 34), top = clamp(6, rect.top - padding, innerHeight - 34)
+  highlight.style.left = `${left}px`; highlight.style.top = `${top}px`
+  highlight.style.width = `${Math.max(28, Math.min(innerWidth - left - 6, rect.width + padding * 2))}px`
+  highlight.style.height = `${Math.max(28, Math.min(innerHeight - top - 6, rect.height + padding * 2))}px`
+  const cardWidth = card.offsetWidth || 350, cardHeight = card.offsetHeight || 210
+  card.style.left = `${clamp(12, rect.left + rect.width / 2 - cardWidth / 2, Math.max(12, innerWidth - cardWidth - 12))}px`
+  const below = rect.bottom + 15, above = rect.top - cardHeight - 15
+  card.style.top = `${below + cardHeight <= innerHeight - 12 ? below : Math.max(12, above)}px`
+}
+function showTutorialStep(index: number): void {
+  tutorialIndex = clamp(0, index, TUTORIAL_STEPS.length - 1)
+  const step = TUTORIAL_STEPS[tutorialIndex]
+  $('#tutorial-progress').textContent = `${tutorialIndex + 1} / ${TUTORIAL_STEPS.length}`
+  $('#tutorial-title').textContent = step.title; $('#tutorial-text').textContent = step.text
+  $('#tutorial-prev').toggleAttribute('disabled', tutorialIndex === 0)
+  $('#tutorial-next').textContent = tutorialIndex === TUTORIAL_STEPS.length - 1 ? '完成' : '下一步'
+  requestAnimationFrame(positionTutorialStep)
+}
+function startTutorial(force = false): void {
+  if (!force && localStorage.getItem('ji-daw-web-tutorial-v1') === 'done') return
+  closePopups(false); $('#tutorial-overlay').classList.add('open'); showTutorialStep(0)
+}
+function closeTutorial(): void {
+  tutorialIndex = -1; $('#tutorial-overlay').classList.remove('open')
+  localStorage.setItem('ji-daw-web-tutorial-v1', 'done')
+}
+async function loadBundledDemo(): Promise<boolean> {
+  try {
+    const response = await fetch(new URL('DEMO.jidaw', document.baseURI), { cache: 'no-store' })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    project = sanitizeProject(await response.json()); activeTrackId = project.tracks[0].id
+    selectOnly(null); currentBeat = 0; dirty = false; return true
+  } catch (error) {
+    toast(`DEMO.jidaw 加载失败：${error instanceof Error ? error.message : '未知错误'}`, true); return false
+  }
 }
 
 // 单轨音色选择；导入 SF2 后仍可选该 SoundFont 内的预置。
@@ -1009,13 +1086,20 @@ $('#export-track-code').addEventListener('click', () => openTrackCodeExport(acti
 $('#track-code-close').addEventListener('click', () => trackCodeDialog().close())
 $('#track-code-copy').addEventListener('click', copyTrackCode)
 $('#track-code-import').addEventListener('click', importTrackCode)
-$('#new-project').addEventListener('click', async () => { if (dirty && !await confirmAction('新建工程', '当前未保存的修改将被清空。')) return; audio.stop(); project = makeProject(); activeTrackId = project.tracks[0].id; selectOnly(null); history.length = 0; future.length = 0; currentBeat = 0; centrePiano(activeTrack()); renderAll(); commit() })
+$('#tutorial-button').addEventListener('click', () => startTutorial(true))
+$('#tutorial-close').addEventListener('click', closeTutorial)
+$('#tutorial-prev').addEventListener('click', () => showTutorialStep(tutorialIndex - 1))
+$('#tutorial-next').addEventListener('click', () => tutorialIndex === TUTORIAL_STEPS.length - 1 ? closeTutorial() : showTutorialStep(tutorialIndex + 1))
+$('#new-project').addEventListener('click', async () => { if (dirty && !await confirmAction('新建工程', '当前未保存的修改将被清空。')) return; closeTutorial(); audio.stop(); project = makeProject(); activeTrackId = project.tracks[0].id; selectOnly(null); history.length = 0; future.length = 0; currentBeat = 0; centrePiano(activeTrack()); renderAll(); commit() })
 $('#project-name').addEventListener('change', () => { checkpoint(); project.name = $('#project-name').value.trim() || '未命名工程'; commit() })
 $('#bpm-input').addEventListener('change', () => { const value = Number($('#bpm-input').value); if (value < 20 || value > 400) { $('#bpm-input').value = String(project.bpm); return toast('BPM 范围为 20–400', true) } checkpoint(); project.bpm = value; commit() })
 $('#signature-select').addEventListener('change', () => { checkpoint(); project.signature = $('#signature-select').value; renderAll(); commit() })
 $('#snap-select').addEventListener('change', () => { checkpoint(); project.snap = Number($('#snap-select').value); renderPiano(); commit() })
 
 document.addEventListener('keydown', event => {
+  if (tutorialIndex >= 0 && event.key === 'ArrowRight') { event.preventDefault(); tutorialIndex === TUTORIAL_STEPS.length - 1 ? closeTutorial() : showTutorialStep(tutorialIndex + 1); return }
+  if (tutorialIndex >= 0 && event.key === 'ArrowLeft') { event.preventDefault(); showTutorialStep(tutorialIndex - 1); return }
+  if (tutorialIndex >= 0 && event.key === 'Escape') { event.preventDefault(); closeTutorial(); return }
   if (event.key === 'Control') { controlHeld = true; updateToolUi(); return }
   const editing = ['INPUT', 'SELECT'].includes((event.target as HTMLElement).tagName) || (event.target as HTMLElement).isContentEditable
   if (event.key === 'Escape') { closePopups(true); return }
@@ -1035,7 +1119,13 @@ document.addEventListener('keyup', event => { if (event.key === 'Control') { con
 window.addEventListener('blur', () => { controlHeld = false; updateToolUi() })
 new ResizeObserver(() => repositionOpenNoteMenu()).observe($('#root-menu'))
 new ResizeObserver(() => repositionOpenNoteMenu()).observe($('#note-menu'))
-window.addEventListener('resize', () => { renderPiano(); repositionOpenNoteMenu() })
+window.addEventListener('resize', () => { renderPiano(); repositionOpenNoteMenu(); positionTutorialStep() })
 window.addEventListener('beforeunload', event => { if (dirty) { event.preventDefault(); event.returnValue = '' } })
 
-centrePiano(activeTrack()); updateToolUi(); renderAll()
+async function bootstrap(): Promise<void> {
+  const demoLoaded = !autosavedProject && await loadBundledDemo()
+  centrePiano(activeTrack()); updateToolUi(); renderAll()
+  document.title = `${project.name} — 纯律和音图 Web`
+  if (demoLoaded) requestAnimationFrame(() => startTutorial())
+}
+bootstrap()
