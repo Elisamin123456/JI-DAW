@@ -3,7 +3,7 @@ import { parseMidi } from './midi'
 import { exportMidi } from './midi-export'
 import { intervalConnectionStyle, parseRatio, primeLimit, ratioValue } from './ratio'
 import { decodeTrackCode, encodeTrackCode, type TrackCodePayload } from './track-code'
-import { generateTwelveToneRatios, isLegacyPitchRatios, NATURAL_PITCH_CLASSES, pitchClassSpelling, pitchNameForOffset } from './tuning'
+import { generateTwelveToneRatios, isLegacyPitchRatios, NATURAL_PITCH_CLASSES, pitchClassSpelling, pitchNameForOffset, tunedFrequencyForMidiPitch } from './tuning'
 import type { JiAnnotation, JiNote, JiProject, RatioSpec, Track } from './types'
 
 const $ = <T extends HTMLElement = HTMLInputElement>(selector: string): T => {
@@ -669,14 +669,22 @@ async function importMidi(): Promise<void> {
     const file = await pickFile('.mid,.midi,audio/midi'); if (!file) return
     if (dirty && !await confirmAction('导入 MIDI', '导入 MIDI 将替换当前工程。')) return
     const midi = parseMidi(new Uint8Array(await file.arrayBuffer()))
+    const currentTuning = {
+      pitchRatios: project.pitchRatios.map(([numerator, denominator]) => [numerator, denominator] as [number, number]),
+      pitchMode: project.pitchMode,
+      pitchTonic: project.pitchTonic
+    }
     const imported = makeProject(), supportedSignatures = ['4/4', '3/4', '5/4', '6/8', '7/8']
     imported.name = file.name.replace(/\.(mid|midi)$/i, '') || 'MIDI 工程'; imported.bpm = midi.bpm
     imported.signature = midi.signature && supportedSignatures.includes(midi.signature) ? midi.signature : '4/4'
+    imported.pitchRatios = currentTuning.pitchRatios
+    imported.pitchMode = currentTuning.pitchMode
+    imported.pitchTonic = currentTuning.pitchTonic
     const track = imported.tracks[0]
     track.notes = midi.tracks.flatMap(source => source.notes.map(note => ({
       id: uid('note'), trackId: track.id, beat: note.tick / midi.division,
       duration: Math.max(.05, note.durationTicks / midi.division),
-      frequency: 440 * 2 ** ((note.pitch + note.bendSemitones - 69) / 12), velocity: Math.max(.01, note.velocity / 127)
+      frequency: tunedFrequencyForMidiPitch(note.pitch, currentTuning.pitchTonic, currentTuning.pitchRatios), velocity: Math.max(.01, note.velocity / 127)
     })))
     if (!track.notes.length) throw new Error('MIDI 文件中没有可导入的音符')
     track.instrument.programIndex = midi.tracks.flatMap(source => source.notes)[0]?.program ?? 0
@@ -684,7 +692,7 @@ async function importMidi(): Promise<void> {
     const endBeat = Math.max(...track.notes.map(note => note.beat + note.duration))
     imported.bars = clamp(4, Math.ceil(endBeat / barLength), 256)
     audio.stop(); project = imported; activeTrackId = track.id; selectOnly(null); currentBeat = 0; currentNoteDuration = 1
-    history.length = 0; future.length = 0; centrePiano(track); renderAll(); commit(`已导入 ${track.notes.length} 个 MIDI 音符`)
+    history.length = 0; future.length = 0; centrePiano(track); renderAll(); commit(`已按当前调律表导入 ${track.notes.length} 个 MIDI 音符`)
   } catch (error) { toast(`MIDI 导入失败：${error instanceof Error ? error.message : '文件无效'}`, true) }
 }
 

@@ -94,6 +94,16 @@ export function generateTwelveToneRatios(mode: string): Fraction[] {
   return ratios
 }
 
+/** 将标准 MIDI 音符编号直接映射到指定主音的十二音自定义调律表。 */
+export function tunedFrequencyForMidiPitch(midiPitch: number, tonicPitchClass: number, ratios: Fraction[]): number {
+  const tonic = ((Math.round(tonicPitchClass) % 12) + 12) % 12
+  const semitonesFromTonic = Math.round(midiPitch) - (60 + tonic)
+  const tableIndex = ((semitonesFromTonic % 12) + 12) % 12
+  const octave = Math.floor(semitonesFromTonic / 12)
+  const [numerator, denominator] = ratios[tableIndex] ?? [1, 1]
+  return 261.625565 * 2 ** (tonic / 12) * (numerator / denominator) * 2 ** octave
+}
+
 export function isLegacyPitchRatios(ratios: Fraction[]): boolean {
   return ratios.length === LEGACY_PITCH_RATIOS.length && ratios.every((ratio, index) => ratio[0] === LEGACY_PITCH_RATIOS[index][0] && ratio[1] === LEGACY_PITCH_RATIOS[index][1])
 }
