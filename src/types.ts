@@ -18,6 +18,16 @@ export interface JiNote {
   ghost?: boolean
   parentId?: string
   ratio?: RatioSpec
+  /** 可选的单音显示颜色；未设置时沿用界面默认色。 */
+  color?: string
+}
+
+export type TuningSystem = 'preset' | 'ratio' | 'edo'
+
+export interface TuningInterval {
+  numerator?: number
+  denominator?: number
+  steps?: number
 }
 
 export interface JiAnnotation {
@@ -67,6 +77,12 @@ export interface JiProject {
   pitchMode: string
   /** 主音的十二平均律音级编号：C=0，C♯=1……B=11。 */
   pitchTonic: number
+  /** 固定调式、自由纯律比例或自由 N-EDO。 */
+  tuningSystem: TuningSystem
+  /** EDO 模式的八度等分数。 */
+  tuningEdo: number
+  /** 自由调律的音程列表；基音 1/1（或 0 步）始终隐含存在。 */
+  tuningIntervals: TuningInterval[]
   tracks: Track[]
 }
 

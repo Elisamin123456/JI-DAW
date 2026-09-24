@@ -11,7 +11,7 @@ export interface TrackCodePayload {
     notes: JiNote[]
     annotations: JiAnnotation[]
   }
-  context: Pick<JiProject, 'bpm' | 'signature' | 'snap' | 'bars' | 'pitchRatios' | 'pitchMode' | 'pitchTonic'>
+  context: Pick<JiProject, 'bpm' | 'signature' | 'snap' | 'bars' | 'pitchRatios' | 'pitchMode' | 'pitchTonic' | 'tuningSystem' | 'tuningEdo' | 'tuningIntervals'>
 }
 
 function base64Url(bytes: Uint8Array): string {
@@ -59,7 +59,8 @@ export async function encodeTrackCode(project: JiProject, track: Track): Promise
     },
     context: {
       bpm: project.bpm, signature: project.signature, snap: project.snap, bars: project.bars,
-      pitchRatios: project.pitchRatios.map(ratio => [ratio[0], ratio[1]]), pitchMode: project.pitchMode, pitchTonic: project.pitchTonic
+      pitchRatios: project.pitchRatios.map(ratio => [ratio[0], ratio[1]]), pitchMode: project.pitchMode, pitchTonic: project.pitchTonic,
+      tuningSystem: project.tuningSystem, tuningEdo: project.tuningEdo, tuningIntervals: project.tuningIntervals.map(interval => ({ ...interval }))
     }
   }
   const bytes = new TextEncoder().encode(JSON.stringify(payload)), compressed = await gzip(bytes)

@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@breezystack/lamejs": "^1.2.7",
     "@gwegash/sf2-player": "^0.1.0"
   },
   "devDependencies": {

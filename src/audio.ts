@@ -60,6 +60,7 @@ interface LoadedFont {
   player: SF2Player
   path?: string
   programs: readonly SF2Program[]
+  bytes: Uint8Array
 }
 
 interface TrackBus {
@@ -137,11 +138,12 @@ export class AudioEngine {
     await this.resume()
     const old = this.fonts.get(track.id)
     if (old) old.player.dispose()
-    const player = await createSF2Player(this.getContext(), bytes)
+    const fontBytes = bytes.slice()
+    const player = await createSF2Player(this.getContext(), fontBytes)
     player.output.connect(this.busFor(track).gain)
     const index = Math.min(Math.max(track.instrument.programIndex || 0, 0), player.programs.length - 1)
     player.selectProgram(index)
-    this.fonts.set(track.id, { player, path, programs: player.programs })
+    this.fonts.set(track.id, { player, path, programs: player.programs, bytes: fontBytes })
     return player.programs
   }
 
@@ -262,6 +264,86 @@ export class AudioEngine {
   private beatsPerBar(project: JiProject): number {
     const [top, bottom] = project.signature.split('/').map(Number)
     return top * 4 / bottom
+  }
+
+  async render(project: JiProject): Promise<AudioBuffer> {
+    const endLimit = project.bars * this.beatsPerBar(project)
+    const anySolo = project.tracks.some(track => track.solo)
+    const tracks = project.tracks.filter(track => !track.muted && (!anySolo || track.solo))
+    const playable = tracks.flatMap(track => track.notes
+      .filter(note => !note.muted && !note.ghost && note.beat < endLimit && note.beat + note.duration > 0)
+      .map(note => ({ track, note })))
+    if (!playable.length) throw new Error('工程中没有可导出的音符')
+
+    await Promise.all([...new Set(tracks
+      .filter(track => track.instrument.kind === 'builtin' && track.instrument.builtinId)
+      .map(track => track.instrument.builtinId!))].map(id => this.ensureBuiltin(id)))
+
+    const beatSeconds = 60 / project.bpm
+    const endBeat = Math.min(endLimit, Math.max(...playable.map(({ note }) => note.beat + note.duration)))
+    const tailSeconds = 4
+    const durationSeconds = endBeat * beatSeconds + tailSeconds
+    if (durationSeconds > 20 * 60) throw new Error('MP3 导出暂不支持超过 20 分钟的工程')
+    const sampleRate = 44100
+    const context = new OfflineAudioContext(2, Math.ceil(durationSeconds * sampleRate), sampleRate)
+    const compressor = context.createDynamicsCompressor()
+    compressor.threshold.value = -8; compressor.knee.value = 10; compressor.ratio.value = 6
+    compressor.attack.value = .003; compressor.release.value = .18; compressor.connect(context.destination)
+    const buses = new Map<string, GainNode>()
+    const offlineFonts = new Map<string, SF2Player>()
+
+    for (const track of tracks) {
+      const gain = context.createGain(), panner = context.createStereoPanner()
+      gain.gain.value = Math.max(0, Math.min(track.volume, 1.25)); panner.pan.value = Math.max(-1, Math.min(track.pan, 1))
+      gain.connect(panner); panner.connect(compressor); buses.set(track.id, gain)
+      const loaded = this.fonts.get(track.id)
+      if (track.instrument.kind === 'sf2' && loaded?.bytes) {
+        const player = await createSF2Player(context, loaded.bytes.slice())
+        player.selectProgram(Math.min(Math.max(track.instrument.programIndex || 0, 0), player.programs.length - 1))
+        player.output.connect(gain); offlineFonts.set(track.id, player)
+      }
+    }
+
+    for (const { track, note } of playable) {
+      const start = Math.max(0, note.beat) * beatSeconds
+      const duration = (Math.min(endLimit, note.beat + note.duration) - Math.max(0, note.beat)) * beatSeconds
+      if (duration <= 0) continue
+      const bus = buses.get(track.id)!
+      const midi = 69 + 12 * Math.log2(note.frequency / 440)
+      const font = offlineFonts.get(track.id)
+      if (font) {
+        font.noteOn(midi, Math.round(Math.max(1, Math.min(note.velocity, 1)) * 127), start)
+        font.noteOff(midi, start + duration)
+        continue
+      }
+      const id = track.instrument.kind === 'builtin' ? track.instrument.builtinId : undefined
+      const buffers = id ? this.builtinBuffers.get(id) : undefined
+      const definition = id ? BUILTIN_DEFINITIONS[id] : undefined
+      if (buffers?.size && definition) {
+        const sampleMidi = [...buffers.keys()].reduce((best, key) => Math.abs(key - midi) < Math.abs(best - midi) ? key : best)
+        const source = context.createBufferSource(), envelope = context.createGain()
+        source.buffer = buffers.get(sampleMidi)!
+        source.playbackRate.value = 2 ** ((midi - sampleMidi) / 12)
+        const peak = Math.max(.0001, Math.min(note.velocity, 1.25))
+        envelope.gain.setValueAtTime(peak, start)
+        envelope.gain.setValueAtTime(peak, start + Math.max(.01, duration))
+        envelope.gain.exponentialRampToValueAtTime(.0001, start + duration + definition.release)
+        source.connect(envelope); envelope.connect(bus); source.start(start)
+        source.stop(Math.min(durationSeconds, start + duration + definition.release + .05))
+        continue
+      }
+      const oscillator = context.createOscillator(), envelope = context.createGain()
+      oscillator.type = track.name.includes('低音') ? 'square' : 'triangle'; oscillator.frequency.value = note.frequency
+      const peak = Math.max(.0001, note.velocity * .25)
+      envelope.gain.setValueAtTime(.0001, start); envelope.gain.exponentialRampToValueAtTime(peak, start + .008)
+      envelope.gain.setTargetAtTime(peak * .7, start + .03, .08)
+      envelope.gain.setTargetAtTime(.0001, Math.max(start + .05, start + duration - .05), .05)
+      oscillator.connect(envelope); envelope.connect(bus); oscillator.start(start); oscillator.stop(start + duration + .28)
+    }
+
+    const rendered = await context.startRendering()
+    for (const player of offlineFonts.values()) player.dispose()
+    return rendered
   }
 
   private scheduleRange(project: JiProject, fromBeat: number, startAt: number): number {

@@ -3,8 +3,8 @@ import { parseMidi } from './midi'
 import { exportMidi } from './midi-export'
 import { intervalConnectionStyle, parseRatio, primeLimit, ratioValue } from './ratio'
 import { decodeTrackCode, encodeTrackCode, type TrackCodePayload } from './track-code'
-import { generateTwelveToneRatios, isLegacyPitchRatios, NATURAL_PITCH_CLASSES, pitchClassSpelling, pitchNameForOffset, tunedFrequencyForMidiPitch } from './tuning'
-import type { JiAnnotation, JiNote, JiProject, RatioSpec, Track } from './types'
+import { generateTwelveToneRatios, isLegacyPitchRatios, NATURAL_PITCH_CLASSES, nearestTunedFrequency, PITCH_MODES, pitchClassSpelling, pitchNameForOffset, tunedFrequencyForMidiPitch, tuningPitches, tuningPitchName } from './tuning'
+import type { JiAnnotation, JiNote, JiProject, RatioSpec, Track, TuningInterval, TuningSystem } from './types'
 
 const $ = <T extends HTMLElement = HTMLInputElement>(selector: string): T => {
   const element = document.querySelector<T>(selector)
@@ -46,13 +46,80 @@ const INTERVAL_PRESETS: Record<number, Array<[string, string]>> = {
 }
 const PRIME_DEFAULT_RATIOS: Record<number, string> = { 2: '2/1', 3: '3/2', 5: '5/4', 7: '7/4', 11: '11/8', 13: '13/8' }
 const DEFAULT_INTERVAL_RATIOS = new Set(Object.values(PRIME_DEFAULT_RATIOS))
-const PITCH_MODES: Record<string, number[]> = {
-  chromatic: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-  ionian: [0, 2, 4, 5, 7, 9, 11], dorian: [0, 2, 3, 5, 7, 9, 10], phrygian: [0, 1, 3, 5, 7, 8, 10],
-  lydian: [0, 2, 4, 6, 7, 9, 11], mixolydian: [0, 2, 4, 5, 7, 9, 10], aeolian: [0, 2, 3, 5, 7, 8, 9, 10, 11], locrian: [0, 1, 3, 5, 6, 8, 10],
-  'major-pentatonic': [0, 2, 4, 7, 9], 'minor-pentatonic': [0, 3, 5, 7, 10]
-}
 const audio = new AudioEngine()
+const DEFAULT_TUNING_KEY = 'ji-daw-default-tuning-v1'
+
+interface TuningDefinition {
+  version: 1
+  name?: string
+  tonic: number
+  system: TuningSystem
+  mode: string
+  edo: number
+  intervals: TuningInterval[]
+}
+
+function tuningGcd(left: number, right: number): number {
+  let a = Math.abs(Math.trunc(left)), b = Math.abs(Math.trunc(right))
+  while (b) [a, b] = [b, a % b]
+  return a || 1
+}
+
+function sanitizeTuningIntervals(raw: unknown, system: TuningSystem, edo: number): TuningInterval[] {
+  if (system === 'preset' || !Array.isArray(raw)) return []
+  const result: TuningInterval[] = [], keys = new Set<string>()
+  for (const value of raw.slice(0, 512)) {
+    const source = value as TuningInterval
+    if (system === 'ratio') {
+      const rawNumerator = Number(source.numerator), rawDenominator = Number(source.denominator)
+      if (!Number.isFinite(rawNumerator) || !Number.isFinite(rawDenominator) || rawNumerator <= 0 || rawDenominator <= 0) continue
+      let numerator = clamp(1, Math.round(rawNumerator), 1_000_000_000)
+      let denominator = clamp(1, Math.round(rawDenominator), 1_000_000_000)
+      const divisor = tuningGcd(numerator, denominator); numerator /= divisor; denominator /= divisor
+      const ratio = numerator / denominator, key = `${numerator}/${denominator}`
+      if (ratio <= 1 || ratio >= 2 || keys.has(key)) continue
+      keys.add(key); result.push({ numerator, denominator })
+    } else {
+      const steps = Math.round(Number(source.steps))
+      const key = String(steps)
+      if (!Number.isFinite(steps) || steps <= 0 || steps >= edo || keys.has(key)) continue
+      keys.add(key); result.push({ steps })
+    }
+  }
+  return result.sort((left, right) => system === 'ratio'
+    ? (left.numerator! / left.denominator!) - (right.numerator! / right.denominator!)
+    : left.steps! - right.steps!)
+}
+
+function normalizeTuningDefinition(raw: unknown): TuningDefinition {
+  if (!raw || typeof raw !== 'object') throw new Error('调律表格式无效')
+  const source = raw as Partial<TuningDefinition>
+  if (source.version !== undefined && source.version !== 1) throw new Error('不支持的调律表版本')
+  const system: TuningSystem = source.system === 'ratio' || source.system === 'edo' ? source.system : 'preset'
+  const mode = typeof source.mode === 'string' && PITCH_MODES[source.mode] ? source.mode : 'chromatic'
+  const edo = clamp(2, Math.round(Number(source.edo) || 12), 9999)
+  if (system !== 'preset' && !Array.isArray(source.intervals)) throw new Error('自由调律缺少音程列表')
+  const intervals = sanitizeTuningIntervals(source.intervals, system, edo)
+  if (system !== 'preset' && intervals.length !== source.intervals!.length) throw new Error('调律表包含无效或重复音程')
+  return {
+    version: 1, name: typeof source.name === 'string' ? source.name.slice(0, 80) : undefined,
+    tonic: clamp(0, Math.round(Number(source.tonic) || 0), 11), system, mode, edo,
+    intervals
+  }
+}
+
+function loadDefaultTuning(): TuningDefinition | null {
+  try { const stored = localStorage.getItem(DEFAULT_TUNING_KEY); return stored ? normalizeTuningDefinition(JSON.parse(stored)) : null } catch { return null }
+}
+
+function applyTuningDefinition(target: JiProject, definition: TuningDefinition): void {
+  target.pitchTonic = definition.tonic
+  target.tuningSystem = definition.system
+  target.tuningEdo = definition.edo
+  target.tuningIntervals = definition.intervals.map(interval => ({ ...interval }))
+  target.pitchMode = definition.mode
+  if (definition.system === 'preset') target.pitchRatios = generateTwelveToneRatios(definition.mode)
+}
 
 function makeTrack(index: number, name = `轨道 ${index + 1}`): Track {
   return { id: uid('track'), name, color: TRACK_COLORS[index % TRACK_COLORS.length], volume: .8, pan: 0, muted: false, solo: false, height: 78, instrument: { kind: 'builtin', builtinId: 'salamander-piano', name: 'Salamander Grand Piano', programIndex: 0 }, notes: [], annotations: [] }
@@ -60,7 +127,9 @@ function makeTrack(index: number, name = `轨道 ${index + 1}`): Track {
 
 function makeProject(_demo = false): JiProject {
   const tracks = [makeTrack(0, '钢琴')]
-  return { version: 2, name: '我的纯律工程', bpm: 120, signature: '4/4', snap: 1, bars: 16, loop: true, metronome: false, pitchRatios: generateTwelveToneRatios('chromatic'), pitchMode: 'chromatic', pitchTonic: 0, tracks }
+  const created: JiProject = { version: 2, name: '我的纯律工程', bpm: 120, signature: '4/4', snap: 1, bars: 16, loop: true, metronome: false, pitchRatios: generateTwelveToneRatios('chromatic'), pitchMode: 'chromatic', pitchTonic: 0, tuningSystem: 'preset', tuningEdo: 12, tuningIntervals: [], tracks }
+  const defaultTuning = loadDefaultTuning(); if (defaultTuning) applyTuningDefinition(created, defaultTuning)
+  return created
 }
 
 function sanitizeProject(raw: unknown): JiProject {
@@ -77,13 +146,16 @@ function sanitizeProject(raw: unknown): JiProject {
     })
     : generatedRatios
   if (isLegacyPitchRatios(pitchRatios)) pitchRatios = generatedRatios
+  const tuningSystem: TuningSystem = input.tuningSystem === 'ratio' || input.tuningSystem === 'edo' ? input.tuningSystem : 'preset'
+  const tuningEdo = clamp(2, Math.round(Number(input.tuningEdo) || 12), 9999)
+  const tuningIntervals = sanitizeTuningIntervals(input.tuningIntervals, tuningSystem, tuningEdo)
   const project: JiProject = {
     version: 2, name: typeof input.name === 'string' ? input.name.slice(0, 120) : '未命名工程',
     bpm: clamp(20, Number(input.bpm) || 120, 400), signature: ['4/4', '3/4', '5/4', '6/8', '7/8'].includes(input.signature ?? '') ? input.signature! : '4/4',
     snap: [0, .25, .5, 1, 2].includes(Number(input.snap)) ? Number(input.snap) : 1,
     bars: clamp(4, Math.round(Number(input.bars) || 16), 256), loop: input.loop !== false, metronome: Boolean(input.metronome),
     pitchRatios, pitchMode,
-    pitchTonic: clamp(0, Math.round(Number(input.pitchTonic) || 0), 11), tracks: []
+    pitchTonic: clamp(0, Math.round(Number(input.pitchTonic) || 0), 11), tuningSystem, tuningEdo, tuningIntervals, tracks: []
   }
   project.tracks = input.tracks.slice(0, 64).map((rawTrack, index) => {
     const source = rawTrack as Track
@@ -107,7 +179,8 @@ function sanitizeProject(raw: unknown): JiProject {
         id: typeof note.id === 'string' ? note.id : uid('note'), trackId: track.id,
         beat: Math.max(0, Number(note.beat) || 0), duration: Math.max(.05, Number(note.duration) || 1),
         frequency: clamp(8, Number(note.frequency) || 440, 24000), velocity: clamp(.01, Number(note.velocity) || .8, 1),
-        muted: Boolean(note.muted), ghost: Boolean(note.ghost), parentId: typeof note.parentId === 'string' ? note.parentId : undefined, ratio
+        muted: Boolean(note.muted), ghost: Boolean(note.ghost), parentId: typeof note.parentId === 'string' ? note.parentId : undefined, ratio,
+        color: /^#[0-9a-f]{6}$/i.test(note.color ?? '') ? note.color : undefined
       }
     }) : []
     track.annotations = Array.isArray(source.annotations) ? source.annotations.slice(0, 1000).map(rawAnnotation => {
@@ -144,7 +217,8 @@ let controlHeld = false
 let selectionBox: { x1: number; y1: number; x2: number; y2: number } | null = null
 let currentBeat = 0
 let currentNoteDuration = 1
-let playbackFollow = false
+type PlaybackFollowMode = 'off' | 'locked' | 'page'
+let playbackFollowMode: PlaybackFollowMode = 'off'
 let lastFollowRender = 0
 let editingAnnotationId: string | null = null
 let annotationSelection: Range | null = null
@@ -179,7 +253,7 @@ function rootSpelling(hz: number): SpelledPitch {
   const midi = Math.round(69 + 12 * Math.log2(hz / 440))
   const pitchClass = ((midi % 12) + 12) % 12
   const relative = ((pitchClass - project.pitchTonic) % 12 + 12) % 12
-  const { letter, accidental } = pitchClassSpelling(project.pitchTonic, relative, project.pitchMode)
+  const { letter, accidental } = pitchClassSpelling(project.pitchTonic, relative, project.tuningSystem === 'preset' ? project.pitchMode : 'chromatic')
   const octave = Math.round((midi - NATURAL_PITCH_CLASSES[letter] - accidental) / 12) - 1
   return { letter, accidental, octave }
 }
@@ -221,18 +295,7 @@ function noteName(note: JiNote, track: Track, cache?: Map<string, SpelledPitch>)
 function ratioText(note: JiNote): string { return note.ratio ? `${note.ratio.direction === 'down' ? '↓' : ''}${note.ratio.numerator}/${note.ratio.denominator}` : '' }
 function snap(value: number): number { return project.snap ? Math.round(value / project.snap) * project.snap : value }
 function snapFrequency(value: number): number {
-  const tonic = 261.625565 * 2 ** (project.pitchTonic / 12)
-  let best = value
-  let bestDistance = Infinity
-  const activePitches = new Set(PITCH_MODES[project.pitchMode] || PITCH_MODES.chromatic)
-  for (let octave = -8; octave <= 8; octave++) for (const [index, [numerator, denominator]] of project.pitchRatios.entries()) {
-    if (!activePitches.has(index)) continue
-    const candidate = tonic * (numerator / denominator) * 2 ** octave
-    if (candidate < 8 || candidate > 24000) continue
-    const distance = Math.abs(Math.log2(value / candidate))
-    if (distance < bestDistance) { best = candidate; bestDistance = distance }
-  }
-  return best
+  return nearestTunedFrequency(value, project)
 }
 function selectOnly(id: string | null): void {
   selectedNoteId = id
@@ -263,6 +326,21 @@ function pickFile(accept: string): Promise<File | null> {
 function exportMidiFile(): void {
   try { download(exportMidi(project), `${project.name || '未命名工程'}.mid`, 'audio/midi'); toast('MIDI 已导出') }
   catch (error) { toast(`MIDI 导出失败：${error instanceof Error ? error.message : '未知错误'}`, true) }
+}
+async function exportMp3File(): Promise<void> {
+  const button = $('#export-mp3') as HTMLButtonElement
+  if (button.disabled) return
+  const label = button.textContent || '导出 MP3'
+  button.disabled = true
+  try {
+    audio.stop(); setPlayState(false); button.textContent = '渲染中…'; toast('正在离线渲染音频…')
+    const rendered = await audio.render(project)
+    button.textContent = '编码中…'
+    const { encodeMp3 } = await import('./mp3-export')
+    const bytes = await encodeMp3(rendered)
+    download(bytes, `${project.name || '未命名工程'}.mp3`, 'audio/mpeg'); toast('MP3 已导出')
+  } catch (error) { toast(`MP3 导出失败：${error instanceof Error ? error.message : '未知错误'}`, true) }
+  finally { button.disabled = false; button.textContent = label }
 }
 
 function checkpoint(): void {
@@ -341,12 +419,11 @@ function renderPiano(): void {
   for (let bar = 0; bar <= project.bars; bar++) {
     const x = screenX(bar * beatsPerBar()); parts.push(`<line class="grid-line bar" x1="${x}" y1="0" x2="${x}" y2="${height}"/>`)
   }
-  const activePitches = new Set(PITCH_MODES[project.pitchMode] || PITCH_MODES.chromatic)
   const tonic = 261.625565 * 2 ** (project.pitchTonic / 12)
-  for (let octave = -8; octave <= 8; octave++) project.pitchRatios.forEach(([numerator, denominator], index) => {
-    if (!activePitches.has(index)) return
-    const y = screenY(tonic * (numerator / denominator) * 2 ** octave)
-    if (y > -10 && y < height + 10) parts.push(`<line class="pitch-guide ${index === 0 ? 'tonic-line' : ''}" x1="0" y1="${y}" x2="${width}" y2="${y}"/>`)
+  const scalePitches = tuningPitches(project)
+  for (let octave = -8; octave <= 8; octave++) scalePitches.forEach(pitch => {
+    const y = screenY(tonic * pitch.value * 2 ** octave)
+    if (y > -10 && y < height + 10) parts.push(`<line class="pitch-guide ${Math.abs(pitch.value - 1) < 1e-9 ? 'tonic-line' : ''}" x1="0" y1="${y}" x2="${width}" y2="${y}"/>`)
   })
   const byId = new Map(track.notes.map(note => [note.id, note]))
   const noteIdsWithChildren = new Set(track.notes.map(note => note.parentId).filter((id): id is string => Boolean(id)))
@@ -377,11 +454,12 @@ function renderPiano(): void {
     const x1 = screenX(note.beat), x2 = screenX(note.beat + note.duration), y = screenY(note.frequency)
     if (x2 < -50 || x1 > width + 50 || y < -50 || y > height + 50) continue
     const label = noteName(note, track, nameCache)
-    if (!note.parentId && noteIdsWithChildren.has(note.id)) parts.push(`<polygon class="root-marker" points="${x1 - 13},${y} ${x1 - 5},${y - 5} ${x1 - 5},${y + 5}"/>`)
+    const noteColor = note.color || '#ffffff'
+    if (!note.parentId && noteIdsWithChildren.has(note.id)) parts.push(`<polygon class="root-marker" style="--note-color:${noteColor}" points="${x1 - 13},${y} ${x1 - 5},${y - 5} ${x1 - 5},${y + 5}"/>`)
     const labelSize = clamp(6, 9 * view.scale, 12), labelStroke = clamp(1.25, 2.25 * view.scale, 2.75)
     const ratioLabel = note.ratio && !DEFAULT_INTERVAL_RATIOS.has(`${note.ratio.numerator}/${note.ratio.denominator}`)
       ? `<tspan class="ratio-text"> · ${ratioText(note)}</tspan>` : ''
-    parts.push(`<g data-note-id="${note.id}" data-ghost="${Boolean(note.ghost)}"><line class="pitch-line ${note.muted ? 'muted' : ''} ${note.ghost ? 'ghost' : ''} ${selectedNoteIds.has(note.id) ? 'selected' : ''}" x1="${x1}" y1="${y}" x2="${x2}" y2="${y}"/><line class="note-hit" x1="${x1}" y1="${y}" x2="${x2}" y2="${y}"/><text class="piano-label" style="font-size:${labelSize}px;stroke-width:${labelStroke}px" x="${x1 + 5 * view.scale}" y="${y + labelSize * .34}">${label}${ratioLabel}</text></g>`)
+    parts.push(`<g data-note-id="${note.id}" data-ghost="${Boolean(note.ghost)}" style="--note-color:${noteColor}"><line class="pitch-line ${note.muted ? 'muted' : ''} ${note.ghost ? 'ghost' : ''} ${selectedNoteIds.has(note.id) ? 'selected' : ''}" x1="${x1}" y1="${y}" x2="${x2}" y2="${y}"/><line class="note-hit" x1="${x1}" y1="${y}" x2="${x2}" y2="${y}"/><text class="piano-label" style="font-size:${labelSize}px;stroke-width:${labelStroke}px" x="${x1 + 5 * view.scale}" y="${y + labelSize * .34}">${label}${ratioLabel}</text></g>`)
   }
   for (const annotation of track.annotations) {
     const x = screenX(annotation.beat), y = screenY(annotation.frequency)
@@ -440,10 +518,10 @@ function showNoteMenu(noteId: string, clientX: number, clientY: number): void {
   const { note } = found; const menu = $(note.parentId ? '#note-menu' : '#root-menu')
   if (note.parentId && note.ratio) {
     $('#note-hz').textContent = note.frequency.toFixed(3); $('#note-name-ratio').textContent = `${noteName(note, found.track)} · ${ratioText(note)}`
-    $('#note-volume').value = String(Math.round(note.velocity * 100)); $('#note-mute').classList.toggle('active', Boolean(note.muted))
+    $('#note-volume').value = String(Math.round(note.velocity * 100)); $('#note-mute').classList.toggle('active', Boolean(note.muted)); $('#note-color').value = note.color || '#ffffff'
   } else {
     $('#root-hz').textContent = note.frequency.toFixed(3); $('#root-note-name').textContent = noteName(note, found.track)
-    $('#root-volume').value = String(Math.round(note.velocity * 100)); $('#root-mute').classList.toggle('active', Boolean(note.muted))
+    $('#root-volume').value = String(Math.round(note.velocity * 100)); $('#root-mute').classList.toggle('active', Boolean(note.muted)); $('#root-color').value = note.color || '#ffffff'
   }
   menu.classList.add('open'); $('#piano-overlay').style.visibility = 'visible'
   noteMenuAnchor = { menu, clientX, clientY }; positionNoteMenu(menu, clientX, clientY)
@@ -562,15 +640,47 @@ function pasteSelectedNotes(): void {
 }
 
 function updatePosition(beat: number): void {
+  const previousBeat = currentBeat
   currentBeat = clamp(0, beat, totalBeats()); const barLength = beatsPerBar(), bar = Math.floor(currentBeat / barLength) + 1, inside = currentBeat % barLength, beatNo = Math.floor(inside) + 1, tick = Math.floor((inside % 1) * 96)
-  if (playbackFollow && (audio.playing || currentBeat === 0) && !$('#piano-view').classList.contains('hidden')) {
-    view.offsetX = pianoCanvas.clientWidth * .25 - currentBeat * 48 * view.scale
-    const now = performance.now(); if (now - lastFollowRender >= 32) { lastFollowRender = now; renderPiano() }
+  if ((audio.playing || currentBeat === 0) && !$('#piano-view').classList.contains('hidden')) {
+    const pixelsPerBeat = 48 * view.scale
+    if (playbackFollowMode === 'locked') {
+      view.offsetX = pianoCanvas.clientWidth * .25 - currentBeat * pixelsPerBeat
+      const now = performance.now(); if (now - lastFollowRender >= 32) { lastFollowRender = now; renderPiano() }
+    } else if (playbackFollowMode === 'page' && audio.playing) {
+      if (currentBeat + .001 < previousBeat) {
+        view.offsetX = 0
+        renderPiano()
+      } else {
+        const leftBeat = -view.offsetX / pixelsPerBeat
+        const rightBeat = (pianoCanvas.clientWidth - view.offsetX) / pixelsPerBeat
+        const lastBarAtRight = Math.floor((rightBeat - .0001) / barLength) * barLength
+        if (lastBarAtRight > leftBeat + .0001 && lastBarAtRight < totalBeats() && currentBeat >= lastBarAtRight) {
+          view.offsetX = -lastBarAtRight * pixelsPerBeat
+          renderPiano()
+        }
+      }
+    }
   }
   const text = `${String(bar).padStart(3, '0')}:${String(beatNo).padStart(2, '0')}:${String(tick).padStart(3, '0')}`
   $('#piano-position').textContent = text
   const line = document.querySelector<SVGLineElement>('#piano-playhead'); if (line) { const x = screenX(currentBeat); line.setAttribute('x1', String(x)); line.setAttribute('x2', String(x)) }
   $('#piano-ruler-playhead').style.left = `${screenX(currentBeat)}px`
+}
+function cyclePlaybackFollow(): void {
+  const modes: PlaybackFollowMode[] = ['off', 'locked', 'page']
+  playbackFollowMode = modes[(modes.indexOf(playbackFollowMode) + 1) % modes.length]
+  const button = $('#piano-follow')
+  const labels: Record<PlaybackFollowMode, { text: string; title: string; toast: string }> = {
+    off: { text: '⌖', title: '播放跟随：关闭（点击切换）', toast: '播放跟随已关闭' },
+    locked: { text: '锁', title: '播放跟随：光标锁定（点击切换）', toast: '播放跟随：光标锁定' },
+    page: { text: '页', title: '播放跟随：按小节翻页（点击切换）', toast: '播放跟随：按小节翻页' }
+  }
+  const state = labels[playbackFollowMode]
+  button.textContent = state.text; button.title = state.title
+  button.classList.toggle('active', playbackFollowMode !== 'off')
+  button.dataset.followMode = playbackFollowMode
+  lastFollowRender = 0; updatePosition(currentBeat); toast(state.toast)
 }
 function seekToBeat(beat: number): void { audio.stop(); setPlayState(false); updatePosition(clamp(0, beat, totalBeats())) }
 async function togglePlay(): Promise<void> {
@@ -606,44 +716,117 @@ function openGlobalSettings(): void {
   closePopups(false); renderGlobalSettings(); $('#global-settings-menu').classList.add('open'); $('#global-overlay').classList.add('open')
 }
 function renderScaleMenu(): void {
-  $('#scale-mode').value = project.pitchMode
   $('#scale-tonic').value = String(project.pitchTonic)
-  const activePitches = new Set(PITCH_MODES[project.pitchMode] || PITCH_MODES.chromatic)
-  $('#scale-ratio-list').innerHTML = project.pitchRatios.map(([numerator, denominator], index) => `<label class="scale-ratio-row ${activePitches.has(index) ? '' : 'inactive'}" data-pitch-index="${index}"><span>${pitchNameForOffset(project.pitchTonic, index, project.pitchMode)}</span><input data-scale-index="${index}" data-part="n" value="${numerator}" ${index === 0 ? 'readonly' : ''}><span>/</span><input data-scale-index="${index}" data-part="d" value="${denominator}" ${index === 0 ? 'readonly' : ''}></label>`).join('')
+  $('#scale-system').value = project.tuningSystem
+  $('#scale-mode').value = project.pitchMode
+  $('#scale-edo').value = String(project.tuningEdo)
+  $('#scale-interval-list').innerHTML = project.tuningIntervals.map(interval => tuningIntervalMarkup(project.tuningSystem, interval)).join('')
+  updateScaleEditor()
 }
-function updateScaleModePreview(): void {
-  const activePitches = new Set(PITCH_MODES[$('#scale-mode').value] || PITCH_MODES.chromatic)
+
+function tuningIntervalMarkup(system: TuningSystem, interval?: TuningInterval): string {
+  if (system === 'edo') return `<div class="tuning-interval-row" data-tuning-row><strong data-tuning-name>—</strong><div class="tuning-value-fields"><input data-part="steps" type="number" step="1" value="${interval?.steps ?? 1}"><span>步</span></div><span data-tuning-cents>—</span><button class="tuning-remove" data-action="remove-tuning" title="删除音程">×</button></div>`
+  return `<div class="tuning-interval-row" data-tuning-row><strong data-tuning-name>—</strong><div class="tuning-value-fields"><input data-part="n" type="number" min="1" step="1" value="${interval?.numerator ?? 3}"><span>/</span><input data-part="d" type="number" min="1" step="1" value="${interval?.denominator ?? 2}"></div><span data-tuning-cents>—</span><button class="tuning-remove" data-action="remove-tuning" title="删除音程">×</button></div>`
+}
+
+function updateScaleEditor(): void {
+  const system = $('#scale-system').value as TuningSystem
+  $('#scale-preset-panel').classList.toggle('hidden', system !== 'preset')
+  $('#scale-custom-panel').classList.toggle('hidden', system === 'preset')
+  $('#scale-edo-row').classList.toggle('hidden', system !== 'edo')
   const tonic = Number($('#scale-tonic').value)
-  const mode = $('#scale-mode').value
-  document.querySelectorAll<HTMLElement>('.scale-ratio-row').forEach(row => {
-    const index = Number(row.dataset.pitchIndex)
-    row.classList.toggle('inactive', !activePitches.has(index))
-    const name = row.querySelector('span'); if (name) name.textContent = pitchNameForOffset(tonic, index, mode)
+  $('#scale-root-name').textContent = pitchNameForOffset(tonic, 0, 'chromatic')
+  $('#scale-root-value').textContent = system === 'edo' ? '0 步' : '1/1'
+  if (system === 'preset') {
+    const mode = $('#scale-mode').value, active = new Set(PITCH_MODES[mode] || PITCH_MODES.chromatic)
+    const ratios = generateTwelveToneRatios(mode)
+    $('#scale-preset-list').innerHTML = ratios.map(([numerator, denominator], index) => active.has(index)
+      ? `<div class="tuning-preview-item"><strong>${pitchNameForOffset(tonic, index, mode)}</strong><span>${numerator}/${denominator}</span></div>` : '').join('')
+  } else updateCustomTuningNames()
+}
+
+function updateCustomTuningNames(): void {
+  const system = $('#scale-system').value as TuningSystem, tonic = Number($('#scale-tonic').value)
+  const edo = clamp(2, Math.round(Number($('#scale-edo').value) || 12), 9999)
+  document.querySelectorAll<HTMLElement>('#scale-interval-list [data-tuning-row]').forEach(row => {
+    let value = NaN
+    if (system === 'ratio') value = Number(row.querySelector<HTMLInputElement>('[data-part="n"]')?.value) / Number(row.querySelector<HTMLInputElement>('[data-part="d"]')?.value)
+    else value = 2 ** (Number(row.querySelector<HTMLInputElement>('[data-part="steps"]')?.value) / edo)
+    const valid = Number.isFinite(value) && value > 1 && value < 2
+    row.querySelector<HTMLElement>('[data-tuning-name]')!.textContent = valid ? tuningPitchName(tonic, value) : '无效音程'
+    row.querySelector<HTMLElement>('[data-tuning-cents]')!.textContent = valid ? `${(1200 * Math.log2(value)).toFixed(1)}¢` : '—'
   })
+}
+
+function addTuningInterval(): void {
+  const system = $('#scale-system').value as TuningSystem, list = $('#scale-interval-list')
+  if (list.children.length >= 512) return toast('一个调律表最多包含 512 个音程', true)
+  let interval: TuningInterval | undefined
+  if (system === 'edo') {
+    const edo = clamp(2, Math.round(Number($('#scale-edo').value) || 12), 9999)
+    const used = new Set([...list.querySelectorAll<HTMLInputElement>('[data-part="steps"]')].map(input => Number(input.value)))
+    const steps = Array.from({ length: edo - 1 }, (_unused, index) => index + 1).find(value => !used.has(value))
+    if (!steps) return toast('该 EDO 的所有步数都已添加', true)
+    interval = { steps }
+  } else {
+    const defaults: Array<[number, number]> = [[16, 15], [9, 8], [6, 5], [5, 4], [4, 3], [45, 32], [3, 2], [8, 5], [5, 3], [7, 4], [15, 8]]
+    const used = new Set([...list.querySelectorAll<HTMLElement>('[data-tuning-row]')].map(row => `${row.querySelector<HTMLInputElement>('[data-part="n"]')?.value}/${row.querySelector<HTMLInputElement>('[data-part="d"]')?.value}`))
+    const ratio = defaults.find(([numerator, denominator]) => !used.has(`${numerator}/${denominator}`)) || [3, 2]
+    interval = { numerator: ratio[0], denominator: ratio[1] }
+  }
+  list.insertAdjacentHTML('beforeend', tuningIntervalMarkup(system, interval)); updateCustomTuningNames()
 }
 function openScaleMenu(): void {
   closePopups(false); renderScaleMenu(); $('#scale-menu').classList.add('open')
   $('#global-overlay').classList.add('open')
 }
-function resetScaleForm(): void {
-  generateTwelveToneRatios($('#scale-mode').value).forEach(([numerator, denominator], index) => {
-    ;($(`[data-scale-index="${index}"][data-part="n"]`) as HTMLInputElement).value = String(numerator)
-    ;($(`[data-scale-index="${index}"][data-part="d"]`) as HTMLInputElement).value = String(denominator)
+
+function tuningDefinitionFromForm(): TuningDefinition {
+  const system = $('#scale-system').value as TuningSystem, tonic = Number($('#scale-tonic').value)
+  const mode = $('#scale-mode').value, edo = clamp(2, Math.round(Number($('#scale-edo').value) || 12), 9999)
+  const intervals: TuningInterval[] = []
+  document.querySelectorAll<HTMLElement>('#scale-interval-list [data-tuning-row]').forEach(row => {
+    if (system === 'ratio') {
+      const ratio = parseRatio(row.querySelector<HTMLInputElement>('[data-part="n"]')?.value ?? '', row.querySelector<HTMLInputElement>('[data-part="d"]')?.value ?? '', 'up')
+      const value = ratioValue(ratio); if (value <= 1 || value >= 2) throw new Error('自由纯律比例必须大于 1/1 且小于 2/1')
+      intervals.push({ numerator: ratio.numerator, denominator: ratio.denominator })
+    } else if (system === 'edo') {
+      const steps = Number(row.querySelector<HTMLInputElement>('[data-part="steps"]')?.value)
+      if (!Number.isInteger(steps) || steps <= 0 || steps >= edo) throw new Error(`EDO 步数必须是 1 到 ${edo - 1} 的整数`)
+      intervals.push({ steps })
+    }
   })
+  const normalized = sanitizeTuningIntervals(intervals, system, edo)
+  if (normalized.length !== intervals.length) throw new Error('调律表中存在重复音程')
+  return normalizeTuningDefinition({ version: 1, tonic, system, mode, edo, intervals: normalized })
 }
+
 function applyScaleForm(): void {
+  try { const definition = tuningDefinitionFromForm(); checkpoint(); applyTuningDefinition(project, definition); closePopups(); renderAll(); commit('调律表已应用') }
+  catch (error) { toast(error instanceof Error ? error.message : '调律表无效', true) }
+}
+
+function exportTuning(): void {
   try {
-    const tonicIndex = Number($('#scale-tonic').value)
-    const ratios = Array.from({ length: 12 }, (_unused, index) => {
-      const ratio = parseRatio($(`[data-scale-index="${index}"][data-part="n"]`).value, $(`[data-scale-index="${index}"][data-part="d"]`).value, 'up')
-      const value = ratioValue(ratio)
-      if (value < 1 || value >= 2) throw new Error(`${pitchNameForOffset(tonicIndex, index, $('#scale-mode').value)} 的比例必须处于 1/1（含）到 2/1（不含）之间`)
-      return [ratio.numerator, ratio.denominator] as [number, number]
-    })
-    if (ratios[0][0] !== ratios[0][1]) throw new Error('主音必须保持为 1/1')
-    for (let index = 1; index < ratios.length; index++) if (ratios[index][0] / ratios[index][1] <= ratios[index - 1][0] / ratios[index - 1][1]) throw new Error('十二音比例必须从主音起依次升高')
-    checkpoint(); project.pitchRatios = ratios; project.pitchMode = $('#scale-mode').value; project.pitchTonic = tonicIndex; closePopups(); renderPiano(); commit('主音、调式与十二音吸附比例已更新')
-  } catch (error) { toast(error instanceof Error ? error.message : '比例无效', true) }
+    const definition = tuningDefinitionFromForm(), systemName = definition.system === 'preset' ? definition.mode : definition.system === 'ratio' ? '纯律' : `${definition.edo}EDO`
+    download(new TextEncoder().encode(JSON.stringify({ ...definition, name: `${pitchNameForOffset(definition.tonic, 0)} ${systemName}` }, null, 2)), `${systemName}.jituning`, 'application/json')
+    toast('调律表已导出')
+  } catch (error) { toast(error instanceof Error ? error.message : '调律表无效', true) }
+}
+
+async function importTuning(): Promise<void> {
+  try {
+    const file = await pickFile('.jituning,.json'); if (!file) return
+    const definition = normalizeTuningDefinition(JSON.parse(await file.text()))
+    checkpoint(); applyTuningDefinition(project, definition); renderScaleMenu(); renderAll(); commit(`已导入调律表${definition.name ? `：${definition.name}` : ''}`)
+  } catch (error) { toast(`调律表导入失败：${error instanceof Error ? error.message : '文件无效'}`, true) }
+}
+
+function setDefaultTuning(): void {
+  try {
+    const definition = tuningDefinitionFromForm(); localStorage.setItem(DEFAULT_TUNING_KEY, JSON.stringify(definition))
+    checkpoint(); applyTuningDefinition(project, definition); renderAll(); commit('已应用并设为新工程默认调律表')
+  } catch (error) { toast(error instanceof Error ? error.message : '调律表无效', true) }
 }
 
 async function saveProject(): Promise<void> {
@@ -672,7 +855,8 @@ async function importMidi(): Promise<void> {
     const currentTuning = {
       pitchRatios: project.pitchRatios.map(([numerator, denominator]) => [numerator, denominator] as [number, number]),
       pitchMode: project.pitchMode,
-      pitchTonic: project.pitchTonic
+      pitchTonic: project.pitchTonic, tuningSystem: project.tuningSystem, tuningEdo: project.tuningEdo,
+      tuningIntervals: project.tuningIntervals.map(interval => ({ ...interval }))
     }
     const imported = makeProject(), supportedSignatures = ['4/4', '3/4', '5/4', '6/8', '7/8']
     imported.name = file.name.replace(/\.(mid|midi)$/i, '') || 'MIDI 工程'; imported.bpm = midi.bpm
@@ -680,11 +864,14 @@ async function importMidi(): Promise<void> {
     imported.pitchRatios = currentTuning.pitchRatios
     imported.pitchMode = currentTuning.pitchMode
     imported.pitchTonic = currentTuning.pitchTonic
+    imported.tuningSystem = currentTuning.tuningSystem
+    imported.tuningEdo = currentTuning.tuningEdo
+    imported.tuningIntervals = currentTuning.tuningIntervals
     const track = imported.tracks[0]
     track.notes = midi.tracks.flatMap(source => source.notes.map(note => ({
       id: uid('note'), trackId: track.id, beat: note.tick / midi.division,
       duration: Math.max(.05, note.durationTicks / midi.division),
-      frequency: tunedFrequencyForMidiPitch(note.pitch, currentTuning.pitchTonic, currentTuning.pitchRatios), velocity: Math.max(.01, note.velocity / 127)
+      frequency: tunedFrequencyForMidiPitch(note.pitch, currentTuning), velocity: Math.max(.01, note.velocity / 127)
     })))
     if (!track.notes.length) throw new Error('MIDI 文件中没有可导入的音符')
     track.instrument.programIndex = midi.tracks.flatMap(source => source.notes)[0]?.program ?? 0
@@ -730,7 +917,8 @@ function projectFromTrackCode(payload: TrackCodePayload): JiProject {
   return sanitizeProject({
     ...base, name: source.name || '轨道码', bpm: context.bpm, signature: context.signature,
     snap: context.snap, bars: context.bars, pitchRatios: context.pitchRatios,
-    pitchMode: context.pitchMode, pitchTonic: context.pitchTonic, tracks: [rawTrack]
+    pitchMode: context.pitchMode, pitchTonic: context.pitchTonic, tuningSystem: context.tuningSystem,
+    tuningEdo: context.tuningEdo, tuningIntervals: context.tuningIntervals, tracks: [rawTrack]
   })
 }
 
@@ -789,7 +977,7 @@ const TUTORIAL_STEPS = [
   },
   {
     target: '#piano-play', title: '播放与跟随',
-    text: '使用播放、停止和循环按钮试听。开启旁边的播放锁定后，光标固定在左侧约四分之一处，谱面随播放滚动。'
+    text: '使用播放、停止和循环按钮试听。跟随按钮依次切换“关闭、光标锁定、小节翻页”：锁定模式让光标固定在左侧约四分之一处；翻页模式在光标越过右侧最近的小节线后，把该小节起点移到最左侧。'
   },
   {
     target: '#global-settings', title: '完整全局设置',
@@ -797,7 +985,7 @@ const TUTORIAL_STEPS = [
   },
   {
     target: '.web-actions', title: '工程、轨道码与 MIDI',
-    text: '顶部可以新建、打开和保存工程，导入/导出轨道码与 MIDI。MIDI 导出会使用多通道 Pitch Bend 保存纯律微分音高。点击右侧“?”可随时重新打开教程。'
+    text: '顶部可以新建、打开和保存工程，导入/导出轨道码与 MIDI，并将当前音色离线渲染为 MP3。MIDI 导出会使用多通道 Pitch Bend 保存纯律微分音高。点击右侧“?”可随时重新打开教程。'
   }
 ] as const
 
@@ -1059,6 +1247,11 @@ function bindVolume(inputId: string): void { $(inputId).addEventListener('change
 bindVolume('#root-volume'); bindVolume('#note-volume')
 function bindMute(buttonId: string): void { $(buttonId).addEventListener('click', () => { const found = findNote(selectedNoteId); if (!found) return; checkpoint(); found.note.muted = !found.note.muted; $(buttonId).classList.toggle('active', Boolean(found.note.muted)); renderPiano(); commit() }) }
 bindMute('#root-mute'); bindMute('#note-mute')
+function bindNoteColor(inputId: string, resetId: string): void {
+  $(inputId).addEventListener('change', () => { const found = findNote(selectedNoteId); if (!found) return; checkpoint(); found.note.color = $(inputId).value; renderAll(); commit('音符颜色已更新') })
+  $(resetId).addEventListener('click', () => { const found = findNote(selectedNoteId); if (!found) return; checkpoint(); delete found.note.color; $(inputId).value = '#ffffff'; renderAll(); commit('已恢复默认音符颜色') })
+}
+bindNoteColor('#root-color', '#root-color-reset'); bindNoteColor('#note-color', '#note-color-reset')
 
 // 设置与运输栏
 $('#settings-snap').addEventListener('change', () => { checkpoint(); project.snap = Number($('#settings-snap').value); $('#snap-select').value = String(project.snap); renderPiano(); commit() })
@@ -1073,14 +1266,15 @@ $('#global-volume').addEventListener('input', () => { activeTrack().volume = Num
 $('#global-volume').addEventListener('change', () => { activeTrack().volume = Number($('#global-volume').value); audio.syncTracks(project.tracks); commit() })
 $('#global-mute').addEventListener('change', () => { checkpoint(); activeTrack().muted = ($('#global-mute') as HTMLInputElement).checked; commit() })
 $('#global-metronome').addEventListener('change', () => { checkpoint(); project.metronome = ($('#global-metronome') as HTMLInputElement).checked; commit() })
-$('#scale-reset').addEventListener('click', resetScaleForm); $('#scale-apply').addEventListener('click', applyScaleForm)
-$('#scale-mode').addEventListener('change', () => { resetScaleForm(); updateScaleModePreview() })
-$('#scale-tonic').addEventListener('change', updateScaleModePreview)
+$('#scale-apply').addEventListener('click', applyScaleForm); $('#scale-import').addEventListener('click', importTuning); $('#scale-export').addEventListener('click', exportTuning); $('#scale-default').addEventListener('click', setDefaultTuning)
+$('#scale-mode').addEventListener('change', updateScaleEditor); $('#scale-tonic').addEventListener('change', updateScaleEditor); $('#scale-edo').addEventListener('input', updateCustomTuningNames)
+$('#scale-system').addEventListener('change', () => { $('#scale-interval-list').innerHTML = ''; updateScaleEditor() }); $('#scale-add-interval').addEventListener('click', addTuningInterval)
+$('#scale-interval-list').addEventListener('input', updateCustomTuningNames); $('#scale-interval-list').addEventListener('click', event => { const button = (event.target as HTMLElement).closest<HTMLElement>('[data-action="remove-tuning"]'); if (!button) return; button.closest('[data-tuning-row]')?.remove(); updateCustomTuningNames() })
 $('#piano-settings').addEventListener('click', openSettings)
 $('#tool-pen').addEventListener('click', () => { activeTool = 'pen'; updateToolUi() })
 $('#tool-select').addEventListener('click', () => { activeTool = 'select'; updateToolUi() })
 $('#tool-text').addEventListener('click', () => { activeTool = 'text'; updateToolUi() })
-$('#piano-follow').addEventListener('click', () => { playbackFollow = !playbackFollow; $('#piano-follow').classList.toggle('active', playbackFollow); lastFollowRender = 0; updatePosition(currentBeat) })
+$('#piano-follow').addEventListener('click', cyclePlaybackFollow)
 $('#piano-play').addEventListener('click', togglePlay)
 $('#piano-stop').addEventListener('click', stopPlayback)
 $('#piano-loop').addEventListener('click', () => { checkpoint(); project.loop = !project.loop; renderAll(); commit() })
@@ -1089,6 +1283,7 @@ $('#piano-undo').addEventListener('click', undo); $('#redo-button').addEventList
 // 工程与全局设置
 $('#save-project').addEventListener('click', saveProject); $('#open-project').addEventListener('click', openProject); $('#import-midi').addEventListener('click', importMidi)
 $('#export-midi').addEventListener('click', exportMidiFile)
+$('#export-mp3').addEventListener('click', exportMp3File)
 $('#import-track-code').addEventListener('click', openTrackCodeImport)
 $('#export-track-code').addEventListener('click', () => openTrackCodeExport(activeTrack()))
 $('#track-code-close').addEventListener('click', () => trackCodeDialog().close())
