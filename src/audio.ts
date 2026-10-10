@@ -1,4 +1,6 @@
 import { createSF2Player, type SF2Player, type SF2Program } from '@gwegash/sf2-player'
+import { scheduleSynthVoice } from './synth'
+import { swungBeat } from './timing'
 import type { JiNote, JiProject, Track } from './types'
 
 export const BUILTIN_INSTRUMENTS = [
@@ -57,10 +59,26 @@ const BUILTIN_DEFINITIONS: Record<string, BuiltinDefinition> = {
 }
 
 interface LoadedFont {
-  player: SF2Player
+  player: ExactSF2Player
   path?: string
   programs: readonly SF2Program[]
   bytes: Uint8Array
+  outputGain: GainNode
+  limiter: DynamicsCompressorNode
+}
+
+interface ExactSF2Player extends SF2Player {
+  noteOnExact: (key: number, pitch: number, velocity?: number, time?: number) => number
+  noteOffVoice: (voiceId: number, time?: number) => void
+}
+function validateSf2(bytes: Uint8Array): void {
+  if (bytes.byteLength < 12) throw new Error('SF2 文件不完整')
+  const text = (offset: number) => String.fromCharCode(...bytes.subarray(offset, offset + 4))
+  if (text(0) !== 'RIFF' || text(8) !== 'sfbk') throw new Error('文件不是有效的 SoundFont 2（RIFF/sfbk）')
+}
+function scheduleSf2(player: ExactSF2Player, midi: number, velocity: number, start: number, end: number): void {
+  const key = Math.max(0, Math.min(127, Math.round(midi)))
+  const voiceId = player.noteOnExact(key, midi, velocity, start); player.noteOffVoice(voiceId, end)
 }
 
 interface TrackBus {
@@ -71,12 +89,16 @@ interface TrackBus {
 export class AudioEngine {
   private context: AudioContext | null = null
   private compressor: DynamicsCompressorNode | null = null
+  private masterGain: GainNode | null = null
   private buses = new Map<string, TrackBus>()
   private fonts = new Map<string, LoadedFont>()
   private builtinBuffers = new Map<string, Map<number, AudioBuffer>>()
   private builtinLoads = new Map<string, Promise<Map<number, AudioBuffer>>>()
   private activeSources = new Set<AudioScheduledSourceNode>()
-  private cycleTimer: number | null = null
+  private schedulerTimer: number | null = null
+  private nextScheduleBeat = 0
+  private nextScheduleTime = 0
+  private includeInitialOverlaps = false
   private frame = 0
   private project: JiProject | null = null
   private contextStart = 0
@@ -87,14 +109,16 @@ export class AudioEngine {
 
   private getContext(): AudioContext {
     if (!this.context) {
-      this.context = new AudioContext({ latencyHint: 'interactive' })
+      this.context = new AudioContext({ latencyHint: 'balanced' })
       this.compressor = this.context.createDynamicsCompressor()
-      this.compressor.threshold.value = -8
-      this.compressor.knee.value = 10
-      this.compressor.ratio.value = 6
-      this.compressor.attack.value = 0.003
-      this.compressor.release.value = 0.18
-      this.compressor.connect(this.context.destination)
+      this.masterGain = this.context.createGain()
+      this.compressor.threshold.value = -14
+      this.compressor.knee.value = 12
+      this.compressor.ratio.value = 8
+      this.compressor.attack.value = 0.002
+      this.compressor.release.value = 0.16
+      this.masterGain.gain.value = .82
+      this.compressor.connect(this.masterGain); this.masterGain.connect(this.context.destination)
     }
     return this.context
   }
@@ -129,21 +153,25 @@ export class AudioEngine {
     for (const [id, bus] of this.buses) {
       if (!ids.has(id)) {
         bus.gain.disconnect(); bus.panner.disconnect(); this.buses.delete(id)
-        this.fonts.get(id)?.player.dispose(); this.fonts.delete(id)
+        const font = this.fonts.get(id)
+        font?.player.dispose(); font?.outputGain.disconnect(); font?.limiter.disconnect(); this.fonts.delete(id)
       }
     }
   }
 
   async loadSf2(track: Track, bytes: Uint8Array, path?: string): Promise<readonly SF2Program[]> {
     await this.resume()
+    validateSf2(bytes)
     const old = this.fonts.get(track.id)
-    if (old) old.player.dispose()
     const fontBytes = bytes.slice()
-    const player = await createSF2Player(this.getContext(), fontBytes)
-    player.output.connect(this.busFor(track).gain)
+    const context = this.getContext(), player = await createSF2Player(context, fontBytes) as ExactSF2Player
+    const outputGain = context.createGain(), limiter = context.createDynamicsCompressor()
+    outputGain.gain.value = .48; limiter.threshold.value = -10; limiter.knee.value = 4; limiter.ratio.value = 12; limiter.attack.value = .0015; limiter.release.value = .12
+    player.output.connect(outputGain); outputGain.connect(limiter); limiter.connect(this.busFor(track).gain)
     const index = Math.min(Math.max(track.instrument.programIndex || 0, 0), player.programs.length - 1)
     player.selectProgram(index)
-    this.fonts.set(track.id, { player, path, programs: player.programs, bytes: fontBytes })
+    if (old) { old.player.dispose(); old.outputGain.disconnect(); old.limiter.disconnect() }
+    this.fonts.set(track.id, { player, path, programs: player.programs, bytes: fontBytes, outputGain, limiter })
     return player.programs
   }
 
@@ -224,27 +252,15 @@ export class AudioEngine {
     const font = this.fonts.get(track.id)
     if (track.instrument.kind === 'sf2' && font) {
       const velocity = Math.round(Math.max(1, Math.min(note.velocity, 1)) * 127)
-      font.player.noteOn(midi, velocity, at)
-      font.player.noteOff(midi, at + duration)
+      scheduleSf2(font.player, midi, velocity, at, at + duration)
       return
     }
     if (track.instrument.kind === 'builtin' && track.instrument.builtinId && this.sampledNoteOn(track, note, at, duration, track.instrument.builtinId)) return
-    const oscillator = context.createOscillator()
-    const envelope = context.createGain()
-    oscillator.type = track.name.includes('低音') ? 'square' : 'triangle'
-    oscillator.frequency.setValueAtTime(note.frequency, at)
-    const peak = Math.max(0.0001, note.velocity * 0.25)
-    envelope.gain.setValueAtTime(0.0001, at)
-    envelope.gain.exponentialRampToValueAtTime(peak, at + 0.008)
-    envelope.gain.setTargetAtTime(peak * 0.7, at + 0.03, 0.08)
-    envelope.gain.setTargetAtTime(0.0001, Math.max(at + 0.05, at + duration - 0.05), 0.05)
-    oscillator.connect(envelope)
-    envelope.connect(this.busFor(track).gain)
-    oscillator.start(at)
-    oscillator.stop(at + duration + 0.28)
-    this.activeSources.add(oscillator)
-    oscillator.onended = () => {
-      oscillator.disconnect(); envelope.disconnect(); this.activeSources.delete(oscillator)
+    const voice = scheduleSynthVoice(context, this.busFor(track).gain, note.frequency, note.velocity, at, duration, track.instrument.synthId)
+    let remaining = voice.sources.length
+    for (const source of voice.sources) {
+      this.activeSources.add(source)
+      source.onended = () => { source.disconnect(); this.activeSources.delete(source); if (--remaining === 0) for (const node of voice.nodes) node.disconnect() }
     }
   }
 
@@ -280,17 +296,19 @@ export class AudioEngine {
       .map(track => track.instrument.builtinId!))].map(id => this.ensureBuiltin(id)))
 
     const beatSeconds = 60 / project.bpm
-    const endBeat = Math.min(endLimit, Math.max(...playable.map(({ note }) => note.beat + note.duration)))
+    const endBeat = Math.min(endLimit, Math.max(...playable.map(({ note }) => swungBeat(note.beat, project) + note.duration)))
     const tailSeconds = 4
     const durationSeconds = endBeat * beatSeconds + tailSeconds
     if (durationSeconds > 20 * 60) throw new Error('MP3 导出暂不支持超过 20 分钟的工程')
     const sampleRate = 44100
     const context = new OfflineAudioContext(2, Math.ceil(durationSeconds * sampleRate), sampleRate)
     const compressor = context.createDynamicsCompressor()
-    compressor.threshold.value = -8; compressor.knee.value = 10; compressor.ratio.value = 6
-    compressor.attack.value = .003; compressor.release.value = .18; compressor.connect(context.destination)
+    const masterGain = context.createGain()
+    compressor.threshold.value = -14; compressor.knee.value = 12; compressor.ratio.value = 8
+    compressor.attack.value = .002; compressor.release.value = .16; masterGain.gain.value = .82
+    compressor.connect(masterGain); masterGain.connect(context.destination)
     const buses = new Map<string, GainNode>()
-    const offlineFonts = new Map<string, SF2Player>()
+    const offlineFonts = new Map<string, ExactSF2Player>()
 
     for (const track of tracks) {
       const gain = context.createGain(), panner = context.createStereoPanner()
@@ -298,22 +316,24 @@ export class AudioEngine {
       gain.connect(panner); panner.connect(compressor); buses.set(track.id, gain)
       const loaded = this.fonts.get(track.id)
       if (track.instrument.kind === 'sf2' && loaded?.bytes) {
-        const player = await createSF2Player(context, loaded.bytes.slice())
+        const player = await createSF2Player(context, loaded.bytes.slice()) as ExactSF2Player
         player.selectProgram(Math.min(Math.max(track.instrument.programIndex || 0, 0), player.programs.length - 1))
-        player.output.connect(gain); offlineFonts.set(track.id, player)
+        const sf2Gain = context.createGain(), limiter = context.createDynamicsCompressor()
+        sf2Gain.gain.value = .48; limiter.threshold.value = -10; limiter.knee.value = 4; limiter.ratio.value = 12; limiter.attack.value = .0015; limiter.release.value = .12
+        player.output.connect(sf2Gain); sf2Gain.connect(limiter); limiter.connect(gain); offlineFonts.set(track.id, player)
       }
     }
 
     for (const { track, note } of playable) {
-      const start = Math.max(0, note.beat) * beatSeconds
-      const duration = (Math.min(endLimit, note.beat + note.duration) - Math.max(0, note.beat)) * beatSeconds
+      const playedStart = Math.max(0, swungBeat(note.beat, project)), playedEnd = Math.min(endLimit, playedStart + note.duration)
+      const start = playedStart * beatSeconds
+      const duration = (playedEnd - playedStart) * beatSeconds
       if (duration <= 0) continue
       const bus = buses.get(track.id)!
       const midi = 69 + 12 * Math.log2(note.frequency / 440)
       const font = offlineFonts.get(track.id)
       if (font) {
-        font.noteOn(midi, Math.round(Math.max(1, Math.min(note.velocity, 1)) * 127), start)
-        font.noteOff(midi, start + duration)
+        scheduleSf2(font, midi, Math.round(Math.max(1, Math.min(note.velocity, 1)) * 127), start, start + duration)
         continue
       }
       const id = track.instrument.kind === 'builtin' ? track.instrument.builtinId : undefined
@@ -332,13 +352,7 @@ export class AudioEngine {
         source.stop(Math.min(durationSeconds, start + duration + definition.release + .05))
         continue
       }
-      const oscillator = context.createOscillator(), envelope = context.createGain()
-      oscillator.type = track.name.includes('低音') ? 'square' : 'triangle'; oscillator.frequency.value = note.frequency
-      const peak = Math.max(.0001, note.velocity * .25)
-      envelope.gain.setValueAtTime(.0001, start); envelope.gain.exponentialRampToValueAtTime(peak, start + .008)
-      envelope.gain.setTargetAtTime(peak * .7, start + .03, .08)
-      envelope.gain.setTargetAtTime(.0001, Math.max(start + .05, start + duration - .05), .05)
-      oscillator.connect(envelope); envelope.connect(bus); oscillator.start(start); oscillator.stop(start + duration + .28)
+      scheduleSynthVoice(context, bus, note.frequency, note.velocity, start, duration, track.instrument.synthId)
     }
 
     const rendered = await context.startRendering()
@@ -346,30 +360,52 @@ export class AudioEngine {
     return rendered
   }
 
-  private scheduleRange(project: JiProject, fromBeat: number, startAt: number): number {
+  private scheduleWindow(project: JiProject, fromBeat: number, windowEndBeat: number, startAt: number, includeOverlaps: boolean): void {
     const beatSeconds = 60 / project.bpm
-    const endBeat = project.bars * this.beatsPerBar(project)
+    const projectEndBeat = project.bars * this.beatsPerBar(project)
     const anySolo = project.tracks.some(track => track.solo)
     for (const track of project.tracks) {
       const silent = track.muted || (anySolo && !track.solo)
       this.busFor(track).gain.gain.setValueAtTime(silent ? 0 : track.volume, startAt)
       if (silent) continue
       for (const note of track.notes) {
-        const noteEnd = note.beat + note.duration
-        if (noteEnd <= fromBeat || note.beat >= endBeat) continue
-        const relativeBeat = Math.max(note.beat, fromBeat) - fromBeat
-        const durationBeats = Math.min(noteEnd, endBeat) - Math.max(note.beat, fromBeat)
+        const playedStart = swungBeat(note.beat, project), playedEnd = playedStart + note.duration
+        const startsInWindow = playedStart >= fromBeat - 1e-7 && playedStart < windowEndBeat - 1e-7
+        const overlapsStart = includeOverlaps && playedStart < fromBeat - 1e-7 && playedEnd > fromBeat + 1e-7
+        if ((!startsInWindow && !overlapsStart) || playedEnd <= fromBeat || playedStart >= projectEndBeat) continue
+        const audibleStart = Math.max(playedStart, fromBeat), audibleEnd = Math.min(playedEnd, projectEndBeat)
+        const relativeBeat = audibleStart - fromBeat
+        const durationBeats = audibleEnd - audibleStart
         this.noteOn(track, note, startAt + relativeBeat * beatSeconds, durationBeats * beatSeconds)
       }
     }
     if (project.metronome) {
-      const first = Math.ceil(fromBeat)
+      const first = Math.ceil(fromBeat - 1e-7)
       const beatsPerBar = this.beatsPerBar(project)
-      for (let beat = first; beat < endBeat; beat++) {
+      for (let beat = first; beat < windowEndBeat - 1e-7; beat++) {
         this.click(startAt + (beat - fromBeat) * beatSeconds, beat % beatsPerBar === 0)
       }
     }
-    return (endBeat - fromBeat) * beatSeconds
+  }
+
+  private scheduleAhead = (): void => {
+    if (!this.playing || !this.project) return
+    const project = this.project, context = this.getContext(), beatSeconds = 60 / project.bpm
+    const projectEndBeat = project.bars * this.beatsPerBar(project), horizon = context.currentTime + 1
+    let guard = 0
+    while (this.nextScheduleTime < horizon - .001 && guard++ < 8) {
+      if (this.nextScheduleBeat >= projectEndBeat - 1e-7) {
+        if (!project.loop) break
+        this.nextScheduleBeat = 0; this.includeInitialOverlaps = false
+      }
+      const availableBeats = (horizon - this.nextScheduleTime) / beatSeconds
+      if (availableBeats <= 1e-5) break
+      const windowEndBeat = Math.min(projectEndBeat, this.nextScheduleBeat + availableBeats)
+      this.scheduleWindow(project, this.nextScheduleBeat, windowEndBeat, this.nextScheduleTime, this.includeInitialOverlaps)
+      this.nextScheduleTime += (windowEndBeat - this.nextScheduleBeat) * beatSeconds
+      this.nextScheduleBeat = windowEndBeat; this.includeInitialOverlaps = false
+    }
+    if (this.playing && (project.loop || this.nextScheduleBeat < projectEndBeat - 1e-7)) this.schedulerTimer = window.setTimeout(this.scheduleAhead, 80)
   }
 
   async play(project: JiProject, fromBeat: number, onPosition: (beat: number) => void, onEnded: () => void): Promise<void> {
@@ -382,23 +418,11 @@ export class AudioEngine {
     this.onPosition = onPosition
     this.onEnded = onEnded
     this.playStartBeat = fromBeat
-    this.contextStart = this.getContext().currentTime + 0.06
+    this.contextStart = this.getContext().currentTime + 0.18
+    this.nextScheduleBeat = fromBeat; this.nextScheduleTime = this.contextStart; this.includeInitialOverlaps = true
     this.playing = true
-    const firstDuration = this.scheduleRange(project, fromBeat, this.contextStart)
-    this.armNextCycle(this.contextStart + firstDuration)
+    this.scheduleAhead()
     this.updatePosition()
-  }
-
-  private armNextCycle(nextAt: number): void {
-    if (!this.project) return
-    const project = this.project
-    const delay = Math.max(0, (nextAt - this.getContext().currentTime - 0.12) * 1000)
-    this.cycleTimer = window.setTimeout(() => {
-      if (!this.playing) return
-      if (!project.loop) return
-      const duration = this.scheduleRange(project, 0, nextAt)
-      this.armNextCycle(nextAt + duration)
-    }, delay)
   }
 
   private updatePosition = (): void => {
@@ -415,7 +439,7 @@ export class AudioEngine {
   }
 
   stop(releaseCallback = true): void {
-    if (this.cycleTimer !== null) window.clearTimeout(this.cycleTimer)
+    if (this.schedulerTimer !== null) { window.clearTimeout(this.schedulerTimer); this.schedulerTimer = null }
     cancelAnimationFrame(this.frame)
     for (const font of this.fonts.values()) font.player.allNotesOff()
     for (const source of this.activeSources) {

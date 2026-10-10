@@ -2,8 +2,9 @@ import { AudioEngine, BUILTIN_INSTRUMENTS } from './audio'
 import { parseMidi } from './midi'
 import { exportMidi } from './midi-export'
 import { intervalConnectionStyle, parseRatio, primeLimit, ratioValue } from './ratio'
+import { SYNTH_INSTRUMENTS, synthPreset } from './synth'
 import { decodeTrackCode, encodeTrackCode, type TrackCodePayload } from './track-code'
-import { generateTwelveToneRatios, isLegacyPitchRatios, NATURAL_PITCH_CLASSES, nearestTunedFrequency, PITCH_MODES, pitchClassSpelling, pitchNameForOffset, tunedFrequencyForMidiPitch, tuningPitches, tuningPitchName } from './tuning'
+import { edoGridPosition, edoHarmonizationActive, generateTwelveToneRatios, isLegacyPitchRatios, NATURAL_PITCH_CLASSES, nearestEdoGridFrequency, nearestTunedFrequency, PITCH_MODES, pitchClassSpelling, pitchNameForOffset, ratioEdoSteps, tunedFrequencyForMidiPitch, tuningPitches, tuningPitchName } from './tuning'
 import type { JiAnnotation, JiNote, JiProject, RatioSpec, Track, TuningInterval, TuningSystem } from './types'
 
 const $ = <T extends HTMLElement = HTMLInputElement>(selector: string): T => {
@@ -37,6 +38,12 @@ function sanitizeRichText(value: string): string {
   return template.innerHTML
 }
 const TRACK_COLORS = ['#f2b24d', '#69aef5', '#ab87ef', '#73d398', '#f27992', '#6fd2d9', '#d08bd5']
+const MIN_NOTE_DURATION = 1 / 32
+const SUPPORTED_SNAPS = [0, 1 / 32, 1 / 16, 1 / 12, 1 / 8, 1 / 6, 1 / 4, 1 / 3, 1 / 2, 2 / 3, 1, 2]
+function sanitizeSnap(value: unknown): number {
+  const candidate = Number(value)
+  return SUPPORTED_SNAPS.find(option => Math.abs(option - candidate) < 1e-9) ?? 1
+}
 const INTERVAL_PRESETS: Record<number, Array<[string, string]>> = {
   3: [['9/8', '大全音'], ['4/3', '纯四度'], ['3/2', '纯五度']],
   5: [['10/9', '小全音'], ['6/5', '纯律小三度'], ['5/4', '纯律大三度'], ['8/5', '纯律小六度'], ['5/3', '纯律大六度'], ['9/5', '纯律小七度']],
@@ -56,6 +63,7 @@ interface TuningDefinition {
   system: TuningSystem
   mode: string
   edo: number
+  harmonizeRatiosToEdo: boolean
   intervals: TuningInterval[]
 }
 
@@ -104,6 +112,7 @@ function normalizeTuningDefinition(raw: unknown): TuningDefinition {
   return {
     version: 1, name: typeof source.name === 'string' ? source.name.slice(0, 80) : undefined,
     tonic: clamp(0, Math.round(Number(source.tonic) || 0), 11), system, mode, edo,
+    harmonizeRatiosToEdo: Boolean(source.harmonizeRatiosToEdo),
     intervals
   }
 }
@@ -116,6 +125,7 @@ function applyTuningDefinition(target: JiProject, definition: TuningDefinition):
   target.pitchTonic = definition.tonic
   target.tuningSystem = definition.system
   target.tuningEdo = definition.edo
+  target.harmonizeRatiosToEdo = definition.harmonizeRatiosToEdo
   target.tuningIntervals = definition.intervals.map(interval => ({ ...interval }))
   target.pitchMode = definition.mode
   if (definition.system === 'preset') target.pitchRatios = generateTwelveToneRatios(definition.mode)
@@ -127,7 +137,7 @@ function makeTrack(index: number, name = `轨道 ${index + 1}`): Track {
 
 function makeProject(_demo = false): JiProject {
   const tracks = [makeTrack(0, '钢琴')]
-  const created: JiProject = { version: 2, name: '我的纯律工程', bpm: 120, signature: '4/4', snap: 1, bars: 16, loop: true, metronome: false, pitchRatios: generateTwelveToneRatios('chromatic'), pitchMode: 'chromatic', pitchTonic: 0, tuningSystem: 'preset', tuningEdo: 12, tuningIntervals: [], tracks }
+  const created: JiProject = { version: 2, name: '我的纯律工程', bpm: 120, signature: '4/4', snap: 1, bars: 16, loop: true, metronome: false, swingEnabled: false, swingAmount: 50, pitchRatios: generateTwelveToneRatios('chromatic'), pitchMode: 'chromatic', pitchTonic: 0, tuningSystem: 'preset', tuningEdo: 12, harmonizeRatiosToEdo: false, tuningIntervals: [], tracks }
   const defaultTuning = loadDefaultTuning(); if (defaultTuning) applyTuningDefinition(created, defaultTuning)
   return created
 }
@@ -152,10 +162,12 @@ function sanitizeProject(raw: unknown): JiProject {
   const project: JiProject = {
     version: 2, name: typeof input.name === 'string' ? input.name.slice(0, 120) : '未命名工程',
     bpm: clamp(20, Number(input.bpm) || 120, 400), signature: ['4/4', '3/4', '5/4', '6/8', '7/8'].includes(input.signature ?? '') ? input.signature! : '4/4',
-    snap: [0, .25, .5, 1, 2].includes(Number(input.snap)) ? Number(input.snap) : 1,
+    snap: sanitizeSnap(input.snap),
     bars: clamp(4, Math.round(Number(input.bars) || 16), 256), loop: input.loop !== false, metronome: Boolean(input.metronome),
+    swingEnabled: Boolean(input.swingEnabled), swingAmount: clamp(0, Number.isFinite(Number(input.swingAmount)) ? Number(input.swingAmount) : 50, 100),
     pitchRatios, pitchMode,
-    pitchTonic: clamp(0, Math.round(Number(input.pitchTonic) || 0), 11), tuningSystem, tuningEdo, tuningIntervals, tracks: []
+    pitchTonic: clamp(0, Math.round(Number(input.pitchTonic) || 0), 11), tuningSystem, tuningEdo,
+    harmonizeRatiosToEdo: Boolean(input.harmonizeRatiosToEdo), tuningIntervals, tracks: []
   }
   project.tracks = input.tracks.slice(0, 64).map((rawTrack, index) => {
     const source = rawTrack as Track
@@ -168,7 +180,7 @@ function sanitizeProject(raw: unknown): JiProject {
       instrument: source.instrument?.kind === 'sf2'
         ? { kind: 'sf2', name: String(source.instrument.name || 'SoundFont'), path: source.instrument.path, programIndex: Math.max(0, Math.round(source.instrument.programIndex || 0)), programName: source.instrument.programName, missing: true }
         : source.instrument?.kind === 'synth'
-          ? { kind: 'synth', name: '基础合成器', programIndex: 0 }
+          ? { kind: 'synth', synthId: synthPreset(source.instrument.synthId).id, name: synthPreset(source.instrument.synthId).name, programIndex: 0 }
           : { kind: 'builtin', builtinId: builtin.id, name: builtin.name, programIndex: 0 }, notes: [], annotations: []
     }
     track.notes = Array.isArray(source.notes) ? source.notes.slice(0, 10000).map(rawNote => {
@@ -177,7 +189,7 @@ function sanitizeProject(raw: unknown): JiProject {
       if (note.ratio) ratio = parseRatio(note.ratio.numerator, note.ratio.denominator, note.ratio.direction === 'down' ? 'down' : 'up')
       return {
         id: typeof note.id === 'string' ? note.id : uid('note'), trackId: track.id,
-        beat: Math.max(0, Number(note.beat) || 0), duration: Math.max(.05, Number(note.duration) || 1),
+        beat: Math.max(0, Number(note.beat) || 0), duration: Math.max(MIN_NOTE_DURATION, Number(note.duration) || 1),
         frequency: clamp(8, Number(note.frequency) || 440, 24000), velocity: clamp(.01, Number(note.velocity) || .8, 1),
         muted: Boolean(note.muted), ghost: Boolean(note.ghost), parentId: typeof note.parentId === 'string' ? note.parentId : undefined, ratio,
         color: /^#[0-9a-f]{6}$/i.test(note.color ?? '') ? note.color : undefined
@@ -219,7 +231,6 @@ let currentBeat = 0
 let currentNoteDuration = 1
 type PlaybackFollowMode = 'off' | 'locked' | 'page'
 let playbackFollowMode: PlaybackFollowMode = 'off'
-let lastFollowRender = 0
 let editingAnnotationId: string | null = null
 let annotationSelection: Range | null = null
 let annotationOriginalHtml = ''
@@ -231,6 +242,7 @@ let tutorialIndex = -1
 const history: string[] = []
 const future: string[] = []
 const view = { offsetX: 80, offsetY: 0, scale: 1 }
+let renderedOffsetX = view.offsetX
 
 const pianoCanvas = $('#piano-canvas')
 const pianoSvg = $('#piano-svg') as unknown as SVGSVGElement
@@ -240,6 +252,28 @@ const pianoRulerContent = $('#piano-ruler-content')
 function beatsPerBar(): number { const [top, bottom] = project.signature.split('/').map(Number); return top * 4 / bottom }
 function totalBeats(): number { return project.bars * beatsPerBar() }
 function activeTrack(): Track { return project.tracks.find(track => track.id === activeTrackId) ?? project.tracks[0] }
+function effectiveNoteFrequency(note: JiNote, track: Track, cache = new Map<string, number>(), visiting = new Set<string>()): number {
+  if (!edoHarmonizationActive(project)) return note.frequency
+  const cached = cache.get(note.id); if (cached !== undefined) return cached
+  if (visiting.has(note.id)) return nearestEdoGridFrequency(note.frequency, project)
+  visiting.add(note.id)
+  const parent = note.parentId && note.ratio ? track.notes.find(item => item.id === note.parentId) : undefined
+  const frequency = parent && note.ratio
+    ? effectiveNoteFrequency(parent, track, cache, visiting) * 2 ** (ratioEdoSteps(note.ratio, project) / project.tuningEdo)
+    : nearestEdoGridFrequency(note.frequency, project)
+  visiting.delete(note.id); cache.set(note.id, frequency)
+  return frequency
+}
+function projectWithEffectiveFrequencies(): JiProject {
+  if (!edoHarmonizationActive(project)) return project
+  return { ...project, tracks: project.tracks.map(track => {
+    const cache = new Map<string, number>()
+    return { ...track, notes: track.notes.map(note => ({ ...note, frequency: effectiveNoteFrequency(note, track, cache) })) }
+  }) }
+}
+function auditionNote(track: Track, note: JiNote): Promise<void> {
+  return audio.audition(track, { ...note, frequency: effectiveNoteFrequency(note, track) })
+}
 function findNote(id: string | null): { note: JiNote; track: Track } | null {
   if (!id) return null
   for (const track of project.tracks) { const note = track.notes.find(item => item.id === id); if (note) return { note, track } }
@@ -273,15 +307,15 @@ function intervalDiatonicSteps(ratio: RatioSpec): number {
 }
 function spelledNote(note: JiNote, track: Track, cache = new Map<string, SpelledPitch>(), visiting = new Set<string>()): SpelledPitch {
   const cached = cache.get(note.id); if (cached) return cached
-  if (!note.parentId || !note.ratio || visiting.has(note.id)) { const root = rootSpelling(note.frequency); cache.set(note.id, root); return root }
+  if (!note.parentId || !note.ratio || visiting.has(note.id)) { const root = rootSpelling(effectiveNoteFrequency(note, track)); cache.set(note.id, root); return root }
   const parent = track.notes.find(item => item.id === note.parentId)
-  if (!parent) { const root = rootSpelling(note.frequency); cache.set(note.id, root); return root }
+  if (!parent) { const root = rootSpelling(effectiveNoteFrequency(note, track)); cache.set(note.id, root); return root }
   visiting.add(note.id)
   const parentPitch = spelledNote(parent, track, cache, visiting)
   const direction = note.ratio.direction === 'down' ? -1 : 1
   const absoluteLetter = parentPitch.octave * 7 + parentPitch.letter + direction * intervalDiatonicSteps(note.ratio)
   const letter = ((absoluteLetter % 7) + 7) % 7, octave = Math.floor(absoluteLetter / 7)
-  const midi = Math.round(69 + 12 * Math.log2(note.frequency / 440)), pitchClass = ((midi % 12) + 12) % 12
+  const midi = Math.round(69 + 12 * Math.log2(effectiveNoteFrequency(note, track) / 440)), pitchClass = ((midi % 12) + 12) % 12
   let accidental = pitchClass - NATURAL_PITCH_CLASSES[letter]
   while (accidental > 6) accidental -= 12
   while (accidental < -6) accidental += 12
@@ -291,6 +325,18 @@ function noteName(note: JiNote, track: Track, cache?: Map<string, SpelledPitch>)
   const pitch = spelledNote(note, track, cache)
   const accidental = pitch.accidental > 0 ? '♯'.repeat(pitch.accidental) : pitch.accidental < 0 ? '♭'.repeat(-pitch.accidental) : ''
   return `${LETTER_NAMES[pitch.letter]}${accidental}${pitch.octave}`
+}
+function spellingText(pitch: SpelledPitch): string {
+  const accidental = pitch.accidental > 0 ? '♯'.repeat(pitch.accidental) : pitch.accidental < 0 ? '♭'.repeat(-pitch.accidental) : ''
+  return `${LETTER_NAMES[pitch.letter]}${accidental}${pitch.octave}`
+}
+function renderEdoPosition(selector: string, note: JiNote, frequency: number): void {
+  const element = $(selector)
+  element.classList.toggle('hidden', !edoHarmonizationActive(project))
+  if (!edoHarmonizationActive(project)) { element.textContent = ''; return }
+  const position = edoGridPosition(frequency, project)
+  const lowerTonic = spellingText(rootSpelling(position.lowerTonicFrequency))
+  element.innerHTML = `<strong>${position.edo}-EDO</strong><span>距下方主音 ${lowerTonic}：第 ${position.step} 步</span><small>原始 ${note.frequency.toFixed(3)} Hz</small>`
 }
 function ratioText(note: JiNote): string { return note.ratio ? `${note.ratio.direction === 'down' ? '↓' : ''}${note.ratio.numerator}/${note.ratio.denominator}` : '' }
 function snap(value: number): number { return project.snap ? Math.round(value / project.snap) * project.snap : value }
@@ -302,9 +348,9 @@ function selectOnly(id: string | null): void {
   selectedNoteIds = id ? new Set([id]) : new Set()
 }
 function effectiveTool(): 'pen' | 'select' | 'text' { return controlHeld ? 'select' : activeTool }
-function updateToolUi(): void {
+function updateToolUi(clearSelectionOnExit = true): void {
   const tool = effectiveTool()
-  if (pianoCanvas.dataset.tool === 'select' && tool !== 'select') {
+  if (clearSelectionOnExit && pianoCanvas.dataset.tool === 'select' && tool !== 'select') {
     selectOnly(null); selectionBox = null; renderPiano()
   }
   $('#tool-pen').classList.toggle('active', tool === 'pen')
@@ -324,7 +370,7 @@ function pickFile(accept: string): Promise<File | null> {
   return new Promise(resolve => { input.onchange = () => resolve(input.files?.[0] ?? null); input.click() })
 }
 function exportMidiFile(): void {
-  try { download(exportMidi(project), `${project.name || '未命名工程'}.mid`, 'audio/midi'); toast('MIDI 已导出') }
+  try { download(exportMidi(projectWithEffectiveFrequencies()), `${project.name || '未命名工程'}.mid`, 'audio/midi'); toast('MIDI 已导出') }
   catch (error) { toast(`MIDI 导出失败：${error instanceof Error ? error.message : '未知错误'}`, true) }
 }
 async function exportMp3File(): Promise<void> {
@@ -334,7 +380,7 @@ async function exportMp3File(): Promise<void> {
   button.disabled = true
   try {
     audio.stop(); setPlayState(false); button.textContent = '渲染中…'; toast('正在离线渲染音频…')
-    const rendered = await audio.render(project)
+    const rendered = await audio.render(projectWithEffectiveFrequencies())
     button.textContent = '编码中…'
     const { encodeMp3 } = await import('./mp3-export')
     const bytes = await encodeMp3(rendered)
@@ -375,9 +421,11 @@ function renderAll(): void {
 }
 
 function instrumentOptions(track: Track): string {
-  const value = track.instrument.kind === 'builtin' ? track.instrument.builtinId : track.instrument.kind === 'sf2' ? `sf2-program:${track.instrument.programIndex}` : 'synth'
+  const value = track.instrument.kind === 'builtin' ? track.instrument.builtinId : track.instrument.kind === 'sf2' ? `sf2-program:${track.instrument.programIndex}` : `synth:${synthPreset(track.instrument.synthId).id}`
   const options = BUILTIN_INSTRUMENTS.map(item => `<option value="${item.id}" ${value === item.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`)
-  options.push(`<option value="synth" ${value === 'synth' ? 'selected' : ''}>基础合成器</option>`)
+  options.push('<optgroup label="经典合成器">')
+  SYNTH_INSTRUMENTS.forEach(item => options.push(`<option value="synth:${item.id}" title="${escapeHtml(item.description)}" ${value === `synth:${item.id}` ? 'selected' : ''}>${escapeHtml(item.name)}</option>`))
+  options.push('</optgroup>')
   if (track.instrument.kind === 'sf2') {
     const programs = audio.getPrograms(track.id)
     if (programs.length) programs.forEach((program, index) => options.push(`<option value="sf2-program:${index}" ${index === track.instrument.programIndex ? 'selected' : ''}>SF2 · ${escapeHtml(program.name || `音色 ${index + 1}`)}</option>`))
@@ -392,24 +440,27 @@ function screenY(hz: number): number { return view.offsetY + hzToY(hz) * view.sc
 function worldBeat(clientX: number): number { const rect = pianoCanvas.getBoundingClientRect(); return (clientX - rect.left - view.offsetX) / (48 * view.scale) }
 function worldPitchY(clientY: number): number { const rect = pianoCanvas.getBoundingClientRect(); return (clientY - rect.top - view.offsetY) / view.scale }
 function renderPianoRuler(): void {
-  const parts: string[] = [], barLength = beatsPerBar()
+  const parts: string[] = [], barLength = beatsPerBar(), margin = innerWidth
   for (let beat = 0; beat <= totalBeats(); beat++) {
-    const x = screenX(beat); if (x >= -20 && x <= innerWidth + 20) parts.push(`<span class="ruler-beat" style="left:${x}px"></span>`)
+    const x = screenX(beat); if (x >= -margin && x <= innerWidth + margin) parts.push(`<span class="ruler-beat" style="left:${x}px"></span>`)
   }
   for (let bar = 0; bar <= project.bars; bar++) {
-    const x = screenX(bar * barLength); if (x < -20 || x > innerWidth + 20) continue
+    const x = screenX(bar * barLength); if (x < -margin || x > innerWidth + margin) continue
     parts.push(`<span class="ruler-bar" style="left:${x}px"><b>${bar + 1}</b></span>`)
   }
   pianoRulerContent.innerHTML = parts.join('')
+  pianoRulerContent.style.transform = ''
   $('#piano-ruler-playhead').style.left = `${screenX(currentBeat)}px`
 }
 
 function renderPiano(): void {
   const track = activeTrack(); if (!track) return
   const rect = pianoCanvas.getBoundingClientRect(); const width = rect.width || innerWidth; const height = rect.height || innerHeight
+  renderedOffsetX = view.offsetX
   const parts: string[] = []
-  const leftBeat = (-view.offsetX / view.scale) / 48 - 1
-  const rightBeat = ((width - view.offsetX) / view.scale) / 48 + 1
+  const renderMargin = width
+  const leftBeat = ((-renderMargin - view.offsetX) / view.scale) / 48 - 1
+  const rightBeat = ((width + renderMargin - view.offsetX) / view.scale) / 48 + 1
   const gridStep = project.snap || beatsPerBar()
   const firstGrid = Math.floor(leftBeat / gridStep) * gridStep
   for (let index = 0, beat = firstGrid; beat <= rightBeat && index < 4096; index++, beat = firstGrid + index * gridStep) {
@@ -417,15 +468,16 @@ function renderPiano(): void {
     const x = screenX(beat); parts.push(`<line class="grid-line snap-grid ${wholeBeat ? 'beat' : 'subdivision'}" x1="${x}" y1="0" x2="${x}" y2="${height}"/>`)
   }
   for (let bar = 0; bar <= project.bars; bar++) {
-    const x = screenX(bar * beatsPerBar()); parts.push(`<line class="grid-line bar" x1="${x}" y1="0" x2="${x}" y2="${height}"/>`)
+    const x = screenX(bar * beatsPerBar()); if (x >= -renderMargin && x <= width + renderMargin) parts.push(`<line class="grid-line bar" x1="${x}" y1="0" x2="${x}" y2="${height}"/>`)
   }
   const tonic = 261.625565 * 2 ** (project.pitchTonic / 12)
   const scalePitches = tuningPitches(project)
   for (let octave = -8; octave <= 8; octave++) scalePitches.forEach(pitch => {
     const y = screenY(tonic * pitch.value * 2 ** octave)
-    if (y > -10 && y < height + 10) parts.push(`<line class="pitch-guide ${Math.abs(pitch.value - 1) < 1e-9 ? 'tonic-line' : ''}" x1="0" y1="${y}" x2="${width}" y2="${y}"/>`)
+    if (y > -10 && y < height + 10) parts.push(`<line class="pitch-guide ${Math.abs(pitch.value - 1) < 1e-9 ? 'tonic-line' : ''}" x1="${-renderMargin}" y1="${y}" x2="${width + renderMargin}" y2="${y}"/>`)
   })
   const byId = new Map(track.notes.map(note => [note.id, note]))
+  const effectiveFrequencyCache = new Map<string, number>()
   const noteIdsWithChildren = new Set(track.notes.map(note => note.parentId).filter((id): id is string => Boolean(id)))
   const nameCache = new Map<string, SpelledPitch>()
   for (const note of track.notes) {
@@ -438,7 +490,8 @@ function renderPiano(): void {
     const childX = childBaseX + childLength * style.childAnchor + cap(style.childAnchor)
     let parentX = parentBaseX + parentLength * style.parentAnchor + cap(style.parentAnchor)
     if (limit === 3 || limit === 5) parentX = childX
-    const childY = screenY(note.frequency), parentY = screenY(parent.frequency)
+    const childY = screenY(effectiveNoteFrequency(note, track, effectiveFrequencyCache)), parentY = screenY(effectiveNoteFrequency(parent, track, effectiveFrequencyCache))
+    if (Math.max(childBaseX + childLength, parentBaseX + parentLength) < -renderMargin || Math.min(childBaseX, parentBaseX) > width + renderMargin || (childY < -100 && parentY < -100) || (childY > height + 100 && parentY > height + 100)) continue
     const middleX = (childX + parentX) / 2 + style.middleOffset * view.scale
     const middleY = (childY + parentY) / 2
     const controlX = 2 * middleX - (childX + parentX) / 2
@@ -451,8 +504,8 @@ function renderPiano(): void {
     }
   }
   for (const note of track.notes) {
-    const x1 = screenX(note.beat), x2 = screenX(note.beat + note.duration), y = screenY(note.frequency)
-    if (x2 < -50 || x1 > width + 50 || y < -50 || y > height + 50) continue
+    const x1 = screenX(note.beat), x2 = screenX(note.beat + note.duration), y = screenY(effectiveNoteFrequency(note, track, effectiveFrequencyCache))
+    if (x2 < -renderMargin || x1 > width + renderMargin || y < -50 || y > height + 50) continue
     const label = noteName(note, track, nameCache)
     const noteColor = note.color || '#ffffff'
     if (!note.parentId && noteIdsWithChildren.has(note.id)) parts.push(`<polygon class="root-marker" style="--note-color:${noteColor}" points="${x1 - 13},${y} ${x1 - 5},${y - 5} ${x1 - 5},${y + 5}"/>`)
@@ -463,7 +516,7 @@ function renderPiano(): void {
   }
   for (const annotation of track.annotations) {
     const x = screenX(annotation.beat), y = screenY(annotation.frequency)
-    if (x < -260 || x > width + 20 || y < -130 || y > height + 20) continue
+    if (x < -renderMargin - 260 || x > width + renderMargin || y < -130 || y > height + 20) continue
     const editing = annotation.id === editingAnnotationId
     parts.push(`<foreignObject class="annotation-object" data-annotation-id="${annotation.id}" x="${x}" y="${y}" width="260" height="96"><div xmlns="http://www.w3.org/1999/xhtml" class="piano-annotation" data-annotation-id="${annotation.id}" ${editing ? 'contenteditable="true" spellcheck="true" data-editing="true"' : ''}>${sanitizeRichText(annotation.html)}</div></foreignObject>`)
   }
@@ -471,14 +524,14 @@ function renderPiano(): void {
     const x = Math.min(selectionBox.x1, selectionBox.x2), y = Math.min(selectionBox.y1, selectionBox.y2)
     parts.push(`<rect class="selection-marquee" x="${x}" y="${y}" width="${Math.abs(selectionBox.x2 - selectionBox.x1)}" height="${Math.abs(selectionBox.y2 - selectionBox.y1)}"/>`)
   }
-  parts.push(`<line id="piano-playhead" class="play-indicator" x1="${screenX(currentBeat)}" y1="0" x2="${screenX(currentBeat)}" y2="${height}"/>`)
-  pianoSvg.innerHTML = parts.join('')
+  pianoSvg.innerHTML = `<g id="piano-world">${parts.join('')}</g><line id="piano-playhead" class="play-indicator" x1="${screenX(currentBeat)}" y1="0" x2="${screenX(currentBeat)}" y2="${height}"/>`
   renderPianoRuler()
   if (tutorialIndex >= 0) requestAnimationFrame(positionTutorialStep)
 }
 
 function centrePiano(track: Track): void {
-  const pitches = track.notes.length ? track.notes.map(note => hzToY(note.frequency)).sort((a, b) => a - b) : [hzToY(440)]
+  const cache = new Map<string, number>()
+  const pitches = track.notes.length ? track.notes.map(note => hzToY(effectiveNoteFrequency(note, track, cache))).sort((a, b) => a - b) : [hzToY(440)]
   const middle = pitches[Math.floor(pitches.length / 2)]
   view.scale = 1; view.offsetX = 85 - Math.min(...track.notes.map(note => note.beat), 0) * 48; view.offsetY = innerHeight * .47 - middle
 }
@@ -494,9 +547,9 @@ function recalculateChildren(track: Track, parentId: string): void {
 function addRootAt(clientX: number, clientY: number): void {
   const track = activeTrack(); checkpoint()
   const rawFrequency = clamp(8, yToHz(worldPitchY(clientY)), 24000)
-  const beat = clamp(0, snap(worldBeat(clientX)), totalBeats() - .05)
+  const beat = clamp(0, snap(worldBeat(clientX)), totalBeats() - MIN_NOTE_DURATION)
   const note: JiNote = { id: uid('note'), trackId: track.id, beat, duration: Math.min(currentNoteDuration, totalBeats() - beat), frequency: snapFrequency(rawFrequency), velocity: .8 }
-  track.notes.push(note); selectOnly(note.id); renderPiano(); commit(); audio.audition(track, note)
+  track.notes.push(note); selectOnly(note.id); renderPiano(); commit(); void auditionNote(track, note)
 }
 
 let noteMenuAnchor: { menu: HTMLElement; clientX: number; clientY: number } | null = null
@@ -516,16 +569,19 @@ function showNoteMenu(noteId: string, clientX: number, clientY: number): void {
   const found = findNote(noteId); if (!found) return
   selectOnly(noteId); renderPiano(); closePopups(false)
   const { note } = found; const menu = $(note.parentId ? '#note-menu' : '#root-menu')
+  const frequency = effectiveNoteFrequency(note, found.track)
   if (note.parentId && note.ratio) {
-    $('#note-hz').textContent = note.frequency.toFixed(3); $('#note-name-ratio').textContent = `${noteName(note, found.track)} · ${ratioText(note)}`
+    $('#note-hz').textContent = frequency.toFixed(3); $('#note-name-ratio').textContent = `${noteName(note, found.track)} · ${ratioText(note)}`
+    renderEdoPosition('#note-edo-position', note, frequency)
     $('#note-volume').value = String(Math.round(note.velocity * 100)); $('#note-mute').classList.toggle('active', Boolean(note.muted)); $('#note-color').value = note.color || '#ffffff'
   } else {
-    $('#root-hz').textContent = note.frequency.toFixed(3); $('#root-note-name').textContent = noteName(note, found.track)
+    $('#root-hz').textContent = frequency.toFixed(3); $('#root-note-name').textContent = noteName(note, found.track)
+    renderEdoPosition('#root-edo-position', note, frequency)
     $('#root-volume').value = String(Math.round(note.velocity * 100)); $('#root-mute').classList.toggle('active', Boolean(note.muted)); $('#root-color').value = note.color || '#ffffff'
   }
   menu.classList.add('open'); $('#piano-overlay').style.visibility = 'visible'
   noteMenuAnchor = { menu, clientX, clientY }; positionNoteMenu(menu, clientX, clientY)
-  audio.audition(found.track, note)
+  void auditionNote(found.track, note)
 }
 function annotationEditorElement(): HTMLElement | null {
   return editingAnnotationId ? document.querySelector<HTMLElement>(`.piano-annotation[data-annotation-id="${CSS.escape(editingAnnotationId)}"]`) : null
@@ -561,6 +617,7 @@ function openInlineAnnotationEditor(annotationId: string | null, clientX: number
   if (editingAnnotationId === annotationId && annotationId) return
   finishInlineAnnotation(false); closePopups(false)
   audio.stop(); setPlayState(false)
+  if (!annotationId) selectOnly(null)
   const track = activeTrack(); let annotation = annotationId ? track.annotations.find(item => item.id === annotationId) : undefined
   checkpoint(); annotationWasNew = !annotation
   if (!annotation) {
@@ -593,7 +650,7 @@ function addRatioChild(parent: JiNote, track: Track, numeratorId: string, denomi
     const frequency = parent.frequency * ratioValue(ratio)
     if (frequency < 8 || frequency > 24000) throw new Error('结果频率超出可播放范围')
     checkpoint(); const child: JiNote = { id: uid('note'), trackId: track.id, parentId: parent.id, ratio, beat: parent.beat, duration: parent.duration, frequency, velocity: parent.velocity }
-    track.notes.push(child); selectOnly(child.id); closePopups(); renderPiano(); commit(); audio.audition(track, child)
+    track.notes.push(child); selectOnly(child.id); closePopups(); renderPiano(); commit(); void auditionNote(track, child)
   } catch (error) { toast(error instanceof Error ? error.message : '音程比无效', true) }
 }
 function moveSelectedByRatio(numeratorId: string, denominatorId: string, directionId: string): void {
@@ -606,7 +663,7 @@ function moveSelectedByRatio(numeratorId: string, denominatorId: string, directi
     found.note.ghost = true
     const moved: JiNote = { id: uid('note'), trackId: found.track.id, parentId: found.note.id, ratio, beat: found.note.beat, duration: found.note.duration, frequency, velocity: found.note.velocity }
     found.track.notes.push(moved); selectOnly(moved.id)
-    closePopups(); renderPiano(); commit(); audio.audition(found.track, moved)
+    closePopups(); renderPiano(); commit(); void auditionNote(found.track, moved)
   } catch (error) { toast(error instanceof Error ? error.message : '音程比无效', true) }
 }
 function deleteSelected(): void {
@@ -623,6 +680,25 @@ function copySelectedNotes(): void {
   if (!selected.length) return toast('请先选择音符', true)
   clipboardNotes = selected.map(note => ({ ...note, ratio: note.ratio ? { ...note.ratio } : undefined }))
   closePopups(false); toast(`已复制 ${selected.length} 个音符`)
+}
+function selectAllNotes(): void {
+  const notes = activeTrack().notes
+  selectedNoteIds = new Set(notes.map(note => note.id)); selectedNoteId = notes.at(-1)?.id ?? null
+  closePopups(false); renderAll()
+  if (!notes.length) toast('当前轨道没有音符', true)
+}
+function cutSelectedNotes(): void {
+  const track = activeTrack(); if (!selectedNoteIds.size) return toast('请先选择音符', true)
+  const remove = new Set<string>()
+  for (const id of selectedNoteIds) {
+    const note = track.notes.find(item => item.id === id); if (!note) continue
+    remove.add(id); for (const child of descendants(track, id)) remove.add(child.id)
+  }
+  const cutNotes = track.notes.filter(note => remove.has(note.id))
+  if (!cutNotes.length) return toast('请先选择音符', true)
+  clipboardNotes = cutNotes.map(note => ({ ...note, ratio: note.ratio ? { ...note.ratio } : undefined }))
+  checkpoint(); track.notes = track.notes.filter(note => !remove.has(note.id)); selectOnly(null)
+  closePopups(false); renderAll(); commit(`已剪切 ${cutNotes.length} 个音符`)
 }
 function pasteSelectedNotes(): void {
   if (!clipboardNotes?.length) return toast('剪贴板中没有音符', true)
@@ -646,7 +722,10 @@ function updatePosition(beat: number): void {
     const pixelsPerBeat = 48 * view.scale
     if (playbackFollowMode === 'locked') {
       view.offsetX = pianoCanvas.clientWidth * .25 - currentBeat * pixelsPerBeat
-      const now = performance.now(); if (now - lastFollowRender >= 32) { lastFollowRender = now; renderPiano() }
+      const shift = view.offsetX - renderedOffsetX
+      const world = document.querySelector<SVGGElement>('#piano-world')
+      if (!world || Math.abs(shift) >= Math.max(240, pianoCanvas.clientWidth * .48)) renderPiano()
+      else { world.setAttribute('transform', `translate(${shift} 0)`); pianoRulerContent.style.transform = `translateX(${shift}px)` }
     } else if (playbackFollowMode === 'page' && audio.playing) {
       if (currentBeat + .001 < previousBeat) {
         view.offsetX = 0
@@ -680,12 +759,12 @@ function cyclePlaybackFollow(): void {
   button.textContent = state.text; button.title = state.title
   button.classList.toggle('active', playbackFollowMode !== 'off')
   button.dataset.followMode = playbackFollowMode
-  lastFollowRender = 0; updatePosition(currentBeat); toast(state.toast)
+  updatePosition(currentBeat); toast(state.toast)
 }
 function seekToBeat(beat: number): void { audio.stop(); setPlayState(false); updatePosition(clamp(0, beat, totalBeats())) }
 async function togglePlay(): Promise<void> {
   if (audio.playing) { audio.stop(); setPlayState(false); return }
-  try { setPlayState(true); await audio.play(project, currentBeat >= totalBeats() ? 0 : currentBeat, updatePosition, () => setPlayState(false)) }
+  try { setPlayState(true); await audio.play(projectWithEffectiveFrequencies(), currentBeat >= totalBeats() ? 0 : currentBeat, updatePosition, () => setPlayState(false)) }
   catch (error) { setPlayState(false); toast(error instanceof Error ? error.message : '无法播放', true) }
 }
 function setPlayState(playing: boolean): void {
@@ -696,10 +775,12 @@ function stopPlayback(): void { audio.stop(); setPlayState(false); updatePositio
 async function chooseSf2(track: Track): Promise<void> {
   try {
     const file = await pickFile('.sf2'); if (!file) return
-    checkpoint(); track.instrument = { kind: 'sf2', name: file.name, programIndex: 0, missing: false }
-    const programs = await audio.loadSf2(track, new Uint8Array(await file.arrayBuffer())); track.instrument.programName = programs[0]?.name
+    const instrument = { kind: 'sf2' as const, name: file.name, programIndex: 0, missing: false }
+    const candidate = { ...track, instrument }
+    const programs = await audio.loadSf2(candidate, new Uint8Array(await file.arrayBuffer()))
+    checkpoint(); track.instrument = { ...instrument, programName: programs[0]?.name }
     renderAll(); commit(`已加载 ${track.instrument.name}`)
-  } catch (error) { track.instrument.missing = true; renderAll(); toast(`SF2 加载失败：${error instanceof Error ? error.message : '未知错误'}`, true) }
+  } catch (error) { renderAll(); toast(`SF2 加载失败：${error instanceof Error ? error.message : '未知错误'}`, true) }
 }
 
 function renderSettings(): void {
@@ -708,6 +789,8 @@ function renderSettings(): void {
 function openSettings(): void { closePopups(false); renderSettings(); $('#settings-menu').classList.add('open'); $('#piano-overlay').style.visibility = 'visible' }
 function renderGlobalSettings(): void {
   $('#global-bpm').value = String(project.bpm); $('#global-signature').value = project.signature; $('#global-bars').value = String(project.bars); $('#global-snap').value = String(project.snap)
+  const swingToggle = $('#global-swing') as HTMLInputElement, swingAmount = $('#global-swing-amount') as HTMLInputElement
+  swingToggle.checked = project.swingEnabled; swingAmount.value = String(project.swingAmount); swingAmount.disabled = !project.swingEnabled; $('#global-swing-value').textContent = `${Math.round(project.swingAmount)}%`
   $('#global-volume').value = String(activeTrack().volume)
   ;($('#global-mute') as HTMLInputElement).checked = activeTrack().muted
   ;($('#global-metronome') as HTMLInputElement).checked = project.metronome
@@ -720,6 +803,7 @@ function renderScaleMenu(): void {
   $('#scale-system').value = project.tuningSystem
   $('#scale-mode').value = project.pitchMode
   $('#scale-edo').value = String(project.tuningEdo)
+  ;($('#scale-harmonize') as HTMLInputElement).checked = project.harmonizeRatiosToEdo
   $('#scale-interval-list').innerHTML = project.tuningIntervals.map(interval => tuningIntervalMarkup(project.tuningSystem, interval)).join('')
   updateScaleEditor()
 }
@@ -734,6 +818,7 @@ function updateScaleEditor(): void {
   $('#scale-preset-panel').classList.toggle('hidden', system !== 'preset')
   $('#scale-custom-panel').classList.toggle('hidden', system === 'preset')
   $('#scale-edo-row').classList.toggle('hidden', system !== 'edo')
+  $('#scale-harmonize-row').classList.toggle('hidden', system !== 'edo')
   const tonic = Number($('#scale-tonic').value)
   $('#scale-root-name').textContent = pitchNameForOffset(tonic, 0, 'chromatic')
   $('#scale-root-value').textContent = system === 'edo' ? '0 步' : '1/1'
@@ -784,6 +869,7 @@ function openScaleMenu(): void {
 function tuningDefinitionFromForm(): TuningDefinition {
   const system = $('#scale-system').value as TuningSystem, tonic = Number($('#scale-tonic').value)
   const mode = $('#scale-mode').value, edo = clamp(2, Math.round(Number($('#scale-edo').value) || 12), 9999)
+  const harmonizeRatiosToEdo = system === 'edo' && ($('#scale-harmonize') as HTMLInputElement).checked
   const intervals: TuningInterval[] = []
   document.querySelectorAll<HTMLElement>('#scale-interval-list [data-tuning-row]').forEach(row => {
     if (system === 'ratio') {
@@ -798,7 +884,7 @@ function tuningDefinitionFromForm(): TuningDefinition {
   })
   const normalized = sanitizeTuningIntervals(intervals, system, edo)
   if (normalized.length !== intervals.length) throw new Error('调律表中存在重复音程')
-  return normalizeTuningDefinition({ version: 1, tonic, system, mode, edo, intervals: normalized })
+  return normalizeTuningDefinition({ version: 1, tonic, system, mode, edo, harmonizeRatiosToEdo, intervals: normalized })
 }
 
 function applyScaleForm(): void {
@@ -856,6 +942,7 @@ async function importMidi(): Promise<void> {
       pitchRatios: project.pitchRatios.map(([numerator, denominator]) => [numerator, denominator] as [number, number]),
       pitchMode: project.pitchMode,
       pitchTonic: project.pitchTonic, tuningSystem: project.tuningSystem, tuningEdo: project.tuningEdo,
+      harmonizeRatiosToEdo: project.harmonizeRatiosToEdo,
       tuningIntervals: project.tuningIntervals.map(interval => ({ ...interval }))
     }
     const imported = makeProject(), supportedSignatures = ['4/4', '3/4', '5/4', '6/8', '7/8']
@@ -866,11 +953,12 @@ async function importMidi(): Promise<void> {
     imported.pitchTonic = currentTuning.pitchTonic
     imported.tuningSystem = currentTuning.tuningSystem
     imported.tuningEdo = currentTuning.tuningEdo
+    imported.harmonizeRatiosToEdo = currentTuning.harmonizeRatiosToEdo
     imported.tuningIntervals = currentTuning.tuningIntervals
     const track = imported.tracks[0]
     track.notes = midi.tracks.flatMap(source => source.notes.map(note => ({
       id: uid('note'), trackId: track.id, beat: note.tick / midi.division,
-      duration: Math.max(.05, note.durationTicks / midi.division),
+      duration: Math.max(MIN_NOTE_DURATION, note.durationTicks / midi.division),
       frequency: tunedFrequencyForMidiPitch(note.pitch, currentTuning), velocity: Math.max(.01, note.velocity / 127)
     })))
     if (!track.notes.length) throw new Error('MIDI 文件中没有可导入的音符')
@@ -916,9 +1004,10 @@ function projectFromTrackCode(payload: TrackCodePayload): JiProject {
   }
   return sanitizeProject({
     ...base, name: source.name || '轨道码', bpm: context.bpm, signature: context.signature,
-    snap: context.snap, bars: context.bars, pitchRatios: context.pitchRatios,
+    snap: context.snap, bars: context.bars, swingEnabled: context.swingEnabled, swingAmount: context.swingAmount, pitchRatios: context.pitchRatios,
     pitchMode: context.pitchMode, pitchTonic: context.pitchTonic, tuningSystem: context.tuningSystem,
-    tuningEdo: context.tuningEdo, tuningIntervals: context.tuningIntervals, tracks: [rawTrack]
+    tuningEdo: context.tuningEdo, harmonizeRatiosToEdo: context.harmonizeRatiosToEdo,
+    tuningIntervals: context.tuningIntervals, tracks: [rawTrack]
   })
 }
 
@@ -1042,7 +1131,10 @@ $('#instrument-select').addEventListener('change', async event => {
     renderAll(); commit(`已切换为 ${program.name || `SF2 音色 ${index + 1}`}`); return
   }
   checkpoint()
-  if (input.value === 'synth') track.instrument = { kind: 'synth', name: '基础合成器', programIndex: 0 }
+  if (input.value.startsWith('synth:')) {
+    const definition = synthPreset(input.value.slice(6))
+    track.instrument = { kind: 'synth', synthId: definition.id, name: definition.name, programIndex: 0 }
+  }
   else {
     const definition = BUILTIN_INSTRUMENTS.find(item => item.id === input.value)
     if (!definition) return renderAll()
@@ -1080,7 +1172,8 @@ pianoCanvas.addEventListener('pointerdown', event => {
       const x = upEvent.clientX - rect.left, y = upEvent.clientY - rect.top
       if (moved) {
         const left = Math.min(startX, x), right = Math.max(startX, x), top = Math.min(startY, y), bottom = Math.max(startY, y)
-        const hits = activeTrack().notes.filter(note => screenY(note.frequency) >= top && screenY(note.frequency) <= bottom && screenX(note.beat + note.duration) >= left && screenX(note.beat) <= right).map(note => note.id)
+        const track = activeTrack(), cache = new Map<string, number>()
+        const hits = track.notes.filter(note => screenY(effectiveNoteFrequency(note, track, cache)) >= top && screenY(effectiveNoteFrequency(note, track, cache)) <= bottom && screenX(note.beat + note.duration) >= left && screenX(note.beat) <= right).map(note => note.id)
         for (const id of hits) selectedNoteIds.add(id)
         selectedNoteId = hits.at(-1) ?? selectedNoteId
       } else if (noteElement?.dataset.noteId) {
@@ -1093,42 +1186,71 @@ pianoCanvas.addEventListener('pointerdown', event => {
   }
   if (noteElement) {
     event.preventDefault(); event.stopPropagation(); const track = activeTrack(), note = track.notes.find(item => item.id === noteElement.dataset.noteId); if (!note) return
-    selectOnly(note.id); renderPiano()
-    const startX = event.clientX, startY = event.clientY, originalBeat = note.beat, originalDuration = note.duration, originalFrequency = note.frequency
+    if (selectedNoteIds.has(note.id)) selectedNoteId = note.id
+    else selectOnly(note.id)
+    renderPiano()
+    const startX = event.clientX, startY = event.clientY, originalBeat = note.beat, originalDuration = note.duration
     const lineStart = screenX(note.beat), lineEnd = screenX(note.beat + note.duration)
     const mode = Math.abs(event.clientX - lineStart) <= 12 ? 'head' : Math.abs(event.clientX - lineEnd) <= 12 ? 'tail' : 'body'
-    const childNotes = descendants(track, note.id), childBeats = new Map(childNotes.map(child => [child.id, child.beat]))
-    const shifted = $('#shift-mode').checked ? track.notes.filter(item => item.beat > originalBeat && item.id !== note.id && !childBeats.has(item.id)) : []
+    const selectedNotes = track.notes.filter(item => selectedNoteIds.has(item.id))
+    const selectedIds = new Set(selectedNotes.map(item => item.id)), timeIds = new Set(selectedIds)
+    for (const selected of selectedNotes) for (const child of descendants(track, selected.id)) timeIds.add(child.id)
+    const timeNotes = track.notes.filter(item => timeIds.has(item.id))
+    const originalStates = new Map(timeNotes.map(item => [item.id, { beat: item.beat, duration: item.duration, frequency: item.frequency }]))
+    const pitchRoots = selectedNotes.filter(item => !item.parentId)
+    const shifted = $('#shift-mode').checked ? track.notes.filter(item => item.beat > originalBeat && !timeIds.has(item.id)) : []
     const shiftedBeats = new Map(shifted.map(item => [item.id, item.beat])); let moved = false, saved = false
+    let appliedDelta = 0
+    const applyHorizontalDelta = (requestedDelta: number) => {
+      let minimum = -Infinity, maximum = Infinity
+      if (mode === 'tail') {
+        minimum = Math.max(...selectedNotes.map(item => MIN_NOTE_DURATION - originalStates.get(item.id)!.duration))
+        maximum = Math.min(...selectedNotes.map(item => totalBeats() - originalStates.get(item.id)!.beat - originalStates.get(item.id)!.duration))
+      } else if (mode === 'head') {
+        minimum = Math.max(...timeNotes.map(item => -originalStates.get(item.id)!.beat))
+        maximum = Math.min(
+          ...selectedNotes.map(item => originalStates.get(item.id)!.duration - MIN_NOTE_DURATION),
+          ...timeNotes.filter(item => !selectedIds.has(item.id)).map(item => totalBeats() - originalStates.get(item.id)!.beat - originalStates.get(item.id)!.duration)
+        )
+      } else {
+        minimum = Math.max(...timeNotes.map(item => -originalStates.get(item.id)!.beat))
+        maximum = Math.min(...timeNotes.map(item => totalBeats() - originalStates.get(item.id)!.beat - originalStates.get(item.id)!.duration))
+      }
+      if (shifted.length) {
+        minimum = Math.max(minimum, ...shifted.map(item => -(shiftedBeats.get(item.id) ?? item.beat)))
+        maximum = Math.min(maximum, ...shifted.map(item => totalBeats() - (shiftedBeats.get(item.id) ?? item.beat) - item.duration))
+      }
+      appliedDelta = clamp(minimum, requestedDelta, Math.max(minimum, maximum))
+      if (mode === 'tail') for (const item of selectedNotes) item.duration = originalStates.get(item.id)!.duration + appliedDelta
+      else if (mode === 'head') for (const item of timeNotes) {
+        const original = originalStates.get(item.id)!
+        item.beat = original.beat + appliedDelta
+        if (selectedIds.has(item.id)) item.duration = original.duration - appliedDelta
+      }
+      else for (const item of timeNotes) item.beat = originalStates.get(item.id)!.beat + appliedDelta
+      for (const item of shifted) item.beat = (shiftedBeats.get(item.id) ?? item.beat) + appliedDelta
+    }
     const move = (moveEvent: PointerEvent) => {
       const dxBeats = (moveEvent.clientX - startX) / (48 * view.scale), dyWorld = (moveEvent.clientY - startY) / view.scale
       if (Math.abs(moveEvent.clientX - startX) + Math.abs(moveEvent.clientY - startY) > 3) moved = true
       if (!moved) return
       if (!saved) { checkpoint(); saved = true }
-      if (mode === 'tail') note.duration = clamp(.05, originalDuration + dxBeats, totalBeats() - note.beat)
-      else if (mode === 'head') {
-        const end = originalBeat + originalDuration; note.beat = clamp(0, originalBeat + dxBeats, end - .05); note.duration = end - note.beat
-        const delta = note.beat - originalBeat; for (const child of childNotes) child.beat = (childBeats.get(child.id) ?? child.beat) + delta
-      } else {
-        note.beat = clamp(0, originalBeat + dxBeats, totalBeats() - note.duration); const delta = note.beat - originalBeat
-        for (const child of childNotes) child.beat = (childBeats.get(child.id) ?? child.beat) + delta
-        if (!note.parentId) { note.frequency = clamp(8, yToHz(hzToY(originalFrequency) + dyWorld), 24000); recalculateChildren(track, note.id) }
+      applyHorizontalDelta(dxBeats)
+      if (mode === 'body') for (const root of pitchRoots) {
+        const original = originalStates.get(root.id)!
+        root.frequency = clamp(8, yToHz(hzToY(original.frequency) + dyWorld), 24000)
+        recalculateChildren(track, root.id)
       }
-      const shiftDelta = mode === 'tail' ? note.duration - originalDuration : note.beat - originalBeat
-      for (const item of shifted) item.beat = (shiftedBeats.get(item.id) ?? item.beat) + shiftDelta
       renderPiano()
     }
     const up = (upEvent: PointerEvent) => {
       document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', up)
       if (!moved) return showNoteMenu(note.id, upEvent.clientX, upEvent.clientY)
-      if (mode === 'tail') note.duration = clamp(project.snap || .05, Math.max(project.snap || .05, snap(note.duration)), totalBeats() - note.beat)
-      else {
-        const finalBeat = clamp(0, snap(note.beat), totalBeats() - .05), delta = finalBeat - originalBeat
-        note.beat = finalBeat
-        if (mode === 'head') note.duration = Math.max(.05, originalBeat + originalDuration - finalBeat)
-        if (mode === 'body' && !note.parentId) { note.frequency = snapFrequency(note.frequency); recalculateChildren(track, note.id) }
-        for (const child of childNotes) child.beat = (childBeats.get(child.id) ?? child.beat) + delta
-      }
+      const snappedDelta = mode === 'tail'
+        ? Math.max(project.snap || MIN_NOTE_DURATION, snap(originalDuration + appliedDelta)) - originalDuration
+        : snap(originalBeat + appliedDelta) - originalBeat
+      applyHorizontalDelta(snappedDelta)
+      if (mode === 'body') for (const root of pitchRoots) { root.frequency = snapFrequency(root.frequency); recalculateChildren(track, root.id) }
       if (mode === 'tail' || mode === 'head') currentNoteDuration = note.duration
       renderPiano(); commit()
     }
@@ -1208,7 +1330,7 @@ document.addEventListener('pointerdown', event => {
 })
 
 // 音符菜单
-document.querySelectorAll('.audition-button').forEach(button => button.addEventListener('click', () => { const found = findNote(selectedNoteId); if (found) audio.audition(found.track, found.note) }))
+document.querySelectorAll('.audition-button').forEach(button => button.addEventListener('click', () => { const found = findNote(selectedNoteId); if (found) void auditionNote(found.track, found.note) }))
 $('#piano-overlay').addEventListener('pointerdown', () => closePopups(true)); document.querySelectorAll('.close-popup').forEach(button => button.addEventListener('click', () => closePopups()))
 $('#root-add-ratio').addEventListener('click', () => { const found = findNote(selectedNoteId); if (found) addRatioChild(found.note, found.track, '#root-numerator', '#root-denominator', '#root-direction') })
 $('#root-move-ratio').addEventListener('click', () => moveSelectedByRatio('#root-move-numerator', '#root-move-denominator', '#root-move-direction'))
@@ -1261,6 +1383,9 @@ $('#global-bpm').addEventListener('change', () => { const value = Number($('#glo
 $('#global-signature').addEventListener('change', () => { checkpoint(); project.signature = $('#global-signature').value; renderAll(); commit() })
 $('#global-bars').addEventListener('change', () => { checkpoint(); project.bars = clamp(4, Math.round(Number($('#global-bars').value) || project.bars), 256); renderAll(); commit() })
 $('#global-snap').addEventListener('change', () => { checkpoint(); project.snap = Number($('#global-snap').value); renderAll(); commit() })
+$('#global-swing').addEventListener('change', () => { checkpoint(); project.swingEnabled = ($('#global-swing') as HTMLInputElement).checked; renderGlobalSettings(); commit() })
+$('#global-swing-amount').addEventListener('input', () => { $('#global-swing-value').textContent = `${Math.round(Number($('#global-swing-amount').value))}%` })
+$('#global-swing-amount').addEventListener('change', () => { checkpoint(); project.swingAmount = clamp(0, Number($('#global-swing-amount').value), 100); renderGlobalSettings(); commit() })
 $('#global-volume').addEventListener('pointerdown', checkpoint)
 $('#global-volume').addEventListener('input', () => { activeTrack().volume = Number($('#global-volume').value); audio.syncTracks(project.tracks) })
 $('#global-volume').addEventListener('change', () => { activeTrack().volume = Number($('#global-volume').value); audio.syncTracks(project.tracks); commit() })
@@ -1313,13 +1438,15 @@ document.addEventListener('keydown', event => {
   if (!event.ctrlKey && event.key.toLowerCase() === 'v') { activeTool = 'select'; updateToolUi() }
   if (!event.ctrlKey && event.key.toLowerCase() === 't') { activeTool = 'text'; updateToolUi() }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') { event.preventDefault(); copySelectedNotes() }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') { event.preventDefault(); selectAllNotes() }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'x') { event.preventDefault(); cutSelectedNotes() }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v') { event.preventDefault(); pasteSelectedNotes() }
   if (event.ctrlKey && event.key.toLowerCase() === 's') { event.preventDefault(); saveProject() }
   if (event.ctrlKey && event.key.toLowerCase() === 'o') { event.preventDefault(); openProject() }
   if (event.ctrlKey && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo() }
 })
-document.addEventListener('keyup', event => { if (event.key === 'Control') { controlHeld = false; updateToolUi() } })
-window.addEventListener('blur', () => { controlHeld = false; updateToolUi() })
+document.addEventListener('keyup', event => { if (event.key === 'Control') { controlHeld = false; updateToolUi(false) } })
+window.addEventListener('blur', () => { controlHeld = false; updateToolUi(false) })
 new ResizeObserver(() => repositionOpenNoteMenu()).observe($('#root-menu'))
 new ResizeObserver(() => repositionOpenNoteMenu()).observe($('#note-menu'))
 window.addEventListener('resize', () => { renderPiano(); repositionOpenNoteMenu(); positionTutorialStep() })

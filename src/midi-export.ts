@@ -1,4 +1,5 @@
 import type { JiProject } from './types'
+import { swungBeat } from './timing'
 
 const PPQN = 960
 const CHANNELS = Array.from({ length: 16 }, (_, index) => index).filter(index => index !== 9)
@@ -48,8 +49,9 @@ export function exportMidi(project: JiProject): Uint8Array {
       .map(note => ({ note, program }))
   }).sort((a, b) => a.note.beat - b.note.beat || a.note.frequency - b.note.frequency)
   for (const { note, program } of playable) {
-    const start = Math.max(0, Math.round(note.beat * PPQN))
-    const end = Math.max(start + 1, Math.round((note.beat + note.duration) * PPQN))
+    const swungStart = swungBeat(note.beat, project)
+    const start = Math.max(0, Math.round(swungStart * PPQN))
+    const end = Math.max(start + 1, Math.round((swungStart + note.duration) * PPQN))
     const exactPitch = 69 + 12 * Math.log2(note.frequency / 440)
     const pitch = Math.round(exactPitch)
     const bendSemitones = exactPitch - pitch

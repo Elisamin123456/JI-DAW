@@ -1,4 +1,4 @@
-import type { JiProject } from './types'
+import type { JiProject, RatioSpec } from './types'
 
 export type Fraction = [number, number]
 
@@ -127,7 +127,36 @@ export function pitchNameForOffset(tonicPitchClass: number, semitonesFromTonic: 
 }
 
 type TuningSource = Pick<JiProject, 'pitchRatios' | 'pitchMode' | 'pitchTonic' | 'tuningSystem' | 'tuningEdo' | 'tuningIntervals'>
+type EdoHarmonizationSource = Pick<JiProject, 'pitchTonic' | 'tuningSystem' | 'tuningEdo' | 'harmonizeRatiosToEdo'>
 export interface TuningPitch { value: number; name: string; cents: number; source: string }
+
+export function edoHarmonizationActive(tuning: EdoHarmonizationSource): boolean {
+  return tuning.tuningSystem === 'edo' && Boolean(tuning.harmonizeRatiosToEdo)
+}
+
+export function nearestEdoGridFrequency(frequency: number, tuning: EdoHarmonizationSource): number {
+  if (!edoHarmonizationActive(tuning)) return frequency
+  const edo = Math.max(2, Math.round(Number(tuning.tuningEdo) || 12))
+  const tonic = 261.625565 * 2 ** (tuning.pitchTonic / 12)
+  const steps = Math.round(Math.log2(frequency / tonic) * edo)
+  return tonic * 2 ** (steps / edo)
+}
+
+export function ratioEdoSteps(ratio: RatioSpec, tuning: EdoHarmonizationSource): number {
+  const edo = Math.max(2, Math.round(Number(tuning.tuningEdo) || 12))
+  const value = ratio.direction === 'up' ? ratio.numerator / ratio.denominator : ratio.denominator / ratio.numerator
+  return Math.round(Math.log2(value) * edo)
+}
+
+export interface EdoGridPosition { edo: number; step: number; absoluteStep: number; lowerTonicFrequency: number }
+
+export function edoGridPosition(frequency: number, tuning: EdoHarmonizationSource): EdoGridPosition {
+  const edo = Math.max(2, Math.round(Number(tuning.tuningEdo) || 12))
+  const tonic = 261.625565 * 2 ** (tuning.pitchTonic / 12)
+  const absoluteStep = Math.round(Math.log2(frequency / tonic) * edo)
+  const octave = Math.floor(absoluteStep / edo)
+  return { edo, step: absoluteStep - octave * edo, absoluteStep, lowerTonicFrequency: tonic * 2 ** octave }
+}
 
 export function tuningPitchName(tonicPitchClass: number, value: number): string {
   const cents = 1200 * Math.log2(value)

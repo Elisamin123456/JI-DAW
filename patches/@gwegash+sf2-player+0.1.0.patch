@@ -1,0 +1,110 @@
+diff --git a/node_modules/@gwegash/sf2-player/dist/index.js b/node_modules/@gwegash/sf2-player/dist/index.js
+index 27c382f..2872a2f 100644
+--- a/node_modules/@gwegash/sf2-player/dist/index.js
++++ b/node_modules/@gwegash/sf2-player/dist/index.js
+@@ -470,7 +470,7 @@ var decodeSample = (context, sf, sampleId) => {
+   return buffer;
+ };
+ var startVoice = (options) => {
+-  const { context, destination, buffer, sample, region, note, velocity, time } = options;
++  const { context, destination, buffer, sample, region, note, pitch = note, voiceId = 0, velocity, time } = options;
+   const forcedKey = signedGen(region.gens, GEN.keynum);
+   const forcedVel = signedGen(region.gens, GEN.velocity);
+   const key = forcedKey >= 0 ? forcedKey : note;
+@@ -497,7 +497,7 @@ var startVoice = (options) => {
+   }
+   const source = context.createBufferSource();
+   source.buffer = buffer;
+-  source.playbackRate.value = playbackRate(gens, sample, key, context.sampleRate);
++  source.playbackRate.value = playbackRate(gens, sample, forcedKey >= 0 ? forcedKey : pitch, context.sampleRate);
+   const rate = context.sampleRate;
+   const startAt = sampleAddress(gens, sample.start, GEN.startAddrsOffset, GEN.startAddrsCoarseOffset, sample);
+   const endAt = sampleAddress(gens, sample.end, GEN.endAddrsOffset, GEN.endAddrsCoarseOffset, sample);
+@@ -575,6 +575,7 @@ var startVoice = (options) => {
+   };
+   return {
+     note,
++    voiceId,
+     exclusiveClass: wordGen(gens, GEN.exclusiveClass),
+     release: (at) => fadeOut(at, Math.max(env.release, MIN_FADE)),
+     cut: (at) => fadeOut(at, MIN_FADE),
+@@ -624,6 +625,7 @@ var createSF2Player = async (context, source) => {
+   const buffers = /* @__PURE__ */ new Map();
+   const regions = /* @__PURE__ */ new Map();
+   let voices = [];
++  let nextVoiceId = 1;
+   let current = first;
+   let disposed = false;
+   const bufferFor = (sampleId) => {
+@@ -638,13 +640,15 @@ var createSF2Player = async (context, source) => {
+     return built;
+   };
+   const at = (time) => Math.max(time ?? context.currentTime, 0);
+-  const noteOn = (note, velocity = 100, time) => {
+-    if (disposed) return;
++  const noteOnExact = (note, pitch, velocity = 100, time) => {
++    const voiceId = nextVoiceId++;
++    if (disposed) return voiceId;
+     const when = at(time);
+     for (const region of regionsForNote(regionsFor(current), note, velocity)) {
+       const sample = sf.samples[region.sampleId];
+       const buffer = bufferFor(region.sampleId);
+       if (!sample || !buffer) continue;
++      while (voices.length >= 128) voices.shift()?.cut(when);
+       const voice = startVoice({
+         context,
+         destination: output,
+@@ -652,6 +656,8 @@ var createSF2Player = async (context, source) => {
+         sample,
+         region,
+         note,
++        pitch,
++        voiceId,
+         velocity,
+         time: when
+       });
+@@ -663,11 +669,17 @@ var createSF2Player = async (context, source) => {
+       });
+       voices.push(voice);
+     }
++    return voiceId;
+   };
++  const noteOn = (note, velocity = 100, time) => void noteOnExact(note, note, velocity, time);
+   const noteOff = (note, time) => {
+     const when = at(time);
+     for (const voice of voices) if (voice.note === note) voice.release(when);
+   };
++  const noteOffVoice = (voiceId, time) => {
++    const when = at(time);
++    for (const voice of voices) if (voice.voiceId === voiceId) voice.release(when);
++  };
+   const allNotesOff = (time) => {
+     const when = at(time);
+     for (const voice of voices) voice.release(when);
+@@ -685,7 +697,9 @@ var createSF2Player = async (context, source) => {
+       current = program;
+     },
+     noteOn,
++    noteOnExact,
+     noteOff,
++    noteOffVoice,
+     allNotesOff,
+     dispose: () => {
+       disposed = true;
+diff --git a/node_modules/@gwegash/sf2-player/dist/player.d.ts b/node_modules/@gwegash/sf2-player/dist/player.d.ts
+index b2b8e7d..26d79a5 100644
+--- a/node_modules/@gwegash/sf2-player/dist/player.d.ts
++++ b/node_modules/@gwegash/sf2-player/dist/player.d.ts
+@@ -23,8 +23,12 @@ export type SF2Player = {
+     readonly selectProgram: (index: number) => void;
+     /** Start a note. `time` is on the `AudioContext` clock; default is now. */
+     readonly noteOn: (note: number, velocity?: number, time?: number) => void;
++    /** Select regions with an integer MIDI key while sounding an independent fractional pitch. */
++    readonly noteOnExact: (key: number, pitch: number, velocity?: number, time?: number) => number;
+     /** Release a note started earlier. Ignored if the note is not sounding. */
+     readonly noteOff: (note: number, time?: number) => void;
++    /** Release only the voices created by one noteOnExact call. */
++    readonly noteOffVoice: (voiceId: number, time?: number) => void;
+     /** Release every sounding note. */
+     readonly allNotesOff: (time?: number) => void;
+     /** Silence everything and release all resources. The player is unusable after. */

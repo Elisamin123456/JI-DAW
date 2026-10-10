@@ -53,7 +53,7 @@
       <span class="toolbar-spacer"></span>
       <label class="web-compact">BPM <input id="bpm-input" type="number" min="20" max="400" value="120"></label>
       <label class="web-compact">拍号 <select id="signature-select"><option>4/4</option><option>3/4</option><option>5/4</option><option>6/8</option><option>7/8</option></select></label>
-      <label class="web-compact">吸附 <select id="snap-select"><option value="0.25">1/4</option><option value="0.5">1/2</option><option value="1">1</option><option value="2">2</option><option value="0">关</option></select></label>
+      <label class="web-compact">吸附 <select id="snap-select"><option value="0.03125">1/32 拍</option><option value="0.0625">1/16 拍</option><option value="0.125">1/8 拍</option><option value="0.25">1/4 拍</option><option value="0.5">1/2 拍</option><option value="1">1 拍</option><option value="2">2 拍</option><option value="0.08333333333333333">1/12 拍（三十二分三连音）</option><option value="0.16666666666666666">1/6 拍（十六分三连音）</option><option value="0.3333333333333333">1/3 拍（八分三连音）</option><option value="0.6666666666666666">2/3 拍（四分三连音）</option><option value="0">关</option></select></label>
       <button id="piano-settings" class="toolbar-button" title="钢琴窗设置">⚙</button>
     </footer>
 
@@ -114,7 +114,7 @@
 
     <article id="settings-menu" class="settings-menu glass">
       <header><strong>钢琴窗设置</strong><button class="close-popup menu-icon">×</button></header>
-      <label><span>吸附</span><select id="settings-snap"><option value="0.25">1/4 拍</option><option value="0.5">1/2 拍</option><option value="1">1 拍</option><option value="2">2 拍</option><option value="0">关闭</option></select></label>
+      <label><span>吸附</span><select id="settings-snap"><option value="0.03125">1/32 拍</option><option value="0.0625">1/16 拍</option><option value="0.125">1/8 拍</option><option value="0.25">1/4 拍</option><option value="0.5">1/2 拍</option><option value="1">1 拍</option><option value="2">2 拍</option><option value="0.08333333333333333">1/12 拍（三十二分三连音）</option><option value="0.16666666666666666">1/6 拍（十六分三连音）</option><option value="0.3333333333333333">1/3 拍（八分三连音）</option><option value="0.6666666666666666">2/3 拍（四分三连音）</option><option value="0">关闭</option></select></label>
       <label><span>视图</span><button id="settings-reset-view" class="source-picker">复位缩放与位置</button></label>
     </article>
 
@@ -133,7 +133,8 @@
     <label><span>BPM</span><input id="global-bpm" inputmode="decimal" /></label>
     <label><span>拍号</span><select id="global-signature"><option>4/4</option><option>3/4</option><option>5/4</option><option>6/8</option><option>7/8</option></select></label>
     <label><span>小节数</span><input id="global-bars" type="number" min="4" max="256" /></label>
-    <label><span>时间吸附</span><select id="global-snap"><option value="0.25">1/4 拍</option><option value="0.5">1/2 拍</option><option value="1">1 拍</option><option value="2">2 拍</option><option value="0">关闭</option></select></label>
+    <label><span>时间吸附</span><select id="global-snap"><option value="0.03125">1/32 拍</option><option value="0.0625">1/16 拍</option><option value="0.125">1/8 拍</option><option value="0.25">1/4 拍</option><option value="0.5">1/2 拍</option><option value="1">1 拍</option><option value="2">2 拍</option><option value="0.08333333333333333">1/12 拍（三十二分三连音）</option><option value="0.16666666666666666">1/6 拍（十六分三连音）</option><option value="0.3333333333333333">1/3 拍（八分三连音）</option><option value="0.6666666666666666">2/3 拍（四分三连音）</option><option value="0">关闭</option></select></label>
+    <label class="swing-row"><span>Swing</span><input id="global-swing" type="checkbox" title="启用 Swing"><input id="global-swing-amount" type="range" min="0" max="100" step="1" value="50" title="Swing 强度"><output id="global-swing-value">50%</output></label>
     <label><span>轨道音量</span><input id="global-volume" type="range" min="0" max="1.25" step="0.01" /></label>
     <label><span>轨道静音</span><input id="global-mute" type="checkbox" /></label>
     <label><span>节拍器</span><input id="global-metronome" type="checkbox" /></label>
@@ -183,6 +184,36 @@
   </div>
   <div id="toast" class="toast"></div>
   <input id="fallback-file" class="hidden" type="file" />
-  <script type="module" src="./assets/app.js"></script>
+  <script type="module">
+    const complete = new URLSearchParams(location.search).has('complete')
+    const pageUrl = new URL(complete ? './complete.html' : './single.html', location.href)
+    try {
+      const response = await fetch(pageUrl)
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const parsed = new DOMParser().parseFromString(await response.text(), 'text/html')
+      const scripts = [...parsed.querySelectorAll('script')]
+      scripts.forEach(script => script.remove())
+      for (const element of parsed.querySelectorAll('[href],[src]')) {
+        for (const attribute of ['href', 'src']) {
+          const value = element.getAttribute(attribute)
+          if (value) element.setAttribute(attribute, new URL(value, pageUrl).href)
+        }
+      }
+      document.documentElement.lang = parsed.documentElement.lang || 'zh-CN'
+      document.head.replaceChildren(...[...parsed.head.childNodes].map(node => document.importNode(node, true)))
+      document.body.replaceWith(document.importNode(parsed.body, true))
+      for (const source of scripts) {
+        const script = document.createElement('script')
+        for (const attribute of [...source.attributes]) {
+          const value = attribute.name === 'src' ? new URL(attribute.value, pageUrl).href : attribute.value
+          script.setAttribute(attribute.name, value)
+        }
+        script.textContent = source.textContent
+        document.body.append(script)
+      }
+    } catch (error) {
+      document.body.innerHTML = `<main style="max-width:560px;margin:auto;padding:24px"><h1 style="font-size:20px">页面载入失败</h1><p>${String(error instanceof Error ? error.message : error)}</p><button onclick="location.reload()">重试</button></main>`
+    }
+  </script>
 </body>
 </html>

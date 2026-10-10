@@ -53,7 +53,7 @@
       <span class="toolbar-spacer"></span>
       <label class="web-compact">BPM <input id="bpm-input" type="number" min="20" max="400" value="120"></label>
       <label class="web-compact">拍号 <select id="signature-select"><option>4/4</option><option>3/4</option><option>5/4</option><option>6/8</option><option>7/8</option></select></label>
-      <label class="web-compact">吸附 <select id="snap-select"><option value="0.25">1/4</option><option value="0.5">1/2</option><option value="1">1</option><option value="2">2</option><option value="0">关</option></select></label>
+      <label class="web-compact">吸附 <select id="snap-select"><option value="0.03125">1/32 拍</option><option value="0.0625">1/16 拍</option><option value="0.125">1/8 拍</option><option value="0.25">1/4 拍</option><option value="0.5">1/2 拍</option><option value="1">1 拍</option><option value="2">2 拍</option><option value="0.08333333333333333">1/12 拍（三十二分三连音）</option><option value="0.16666666666666666">1/6 拍（十六分三连音）</option><option value="0.3333333333333333">1/3 拍（八分三连音）</option><option value="0.6666666666666666">2/3 拍（四分三连音）</option><option value="0">关</option></select></label>
       <button id="piano-settings" class="toolbar-button" title="钢琴窗设置">⚙</button>
     </footer>
 
@@ -67,6 +67,7 @@
         <button id="root-copy" class="menu-icon" title="复制">▣</button>
         <button id="root-delete" class="menu-icon danger" title="删除">×</button>
       </div>
+      <div id="root-edo-position" class="edo-position hidden"></div>
       <div class="volume-row"><button id="root-mute" class="mute-button">♪</button><input id="root-volume" type="range" min="0" max="100" value="80" /></div>
       <div class="note-color-row"><span>音符颜色</span><input id="root-color" type="color" value="#ffffff" aria-label="音符颜色"><button id="root-color-reset">默认</button></div>
       <div class="menu-divider"></div>
@@ -93,6 +94,7 @@
         <span id="note-name-ratio" class="note-name">E5 · 3/2</span>
         <button id="note-delete" class="menu-icon danger" title="删除">×</button>
       </div>
+      <div id="note-edo-position" class="edo-position hidden"></div>
       <div class="volume-row"><button id="note-mute" class="mute-button">♪</button><input id="note-volume" type="range" min="0" max="100" value="80" /></div>
       <div class="note-color-row"><span>音符颜色</span><input id="note-color" type="color" value="#ffffff" aria-label="音符颜色"><button id="note-color-reset">默认</button></div>
       <div class="menu-divider"></div>
@@ -114,7 +116,7 @@
 
     <article id="settings-menu" class="settings-menu glass">
       <header><strong>钢琴窗设置</strong><button class="close-popup menu-icon">×</button></header>
-      <label><span>吸附</span><select id="settings-snap"><option value="0.25">1/4 拍</option><option value="0.5">1/2 拍</option><option value="1">1 拍</option><option value="2">2 拍</option><option value="0">关闭</option></select></label>
+      <label><span>吸附</span><select id="settings-snap"><option value="0.03125">1/32 拍</option><option value="0.0625">1/16 拍</option><option value="0.125">1/8 拍</option><option value="0.25">1/4 拍</option><option value="0.5">1/2 拍</option><option value="1">1 拍</option><option value="2">2 拍</option><option value="0.08333333333333333">1/12 拍（三十二分三连音）</option><option value="0.16666666666666666">1/6 拍（十六分三连音）</option><option value="0.3333333333333333">1/3 拍（八分三连音）</option><option value="0.6666666666666666">2/3 拍（四分三连音）</option><option value="0">关闭</option></select></label>
       <label><span>视图</span><button id="settings-reset-view" class="source-picker">复位缩放与位置</button></label>
     </article>
 
@@ -133,7 +135,8 @@
     <label><span>BPM</span><input id="global-bpm" inputmode="decimal" /></label>
     <label><span>拍号</span><select id="global-signature"><option>4/4</option><option>3/4</option><option>5/4</option><option>6/8</option><option>7/8</option></select></label>
     <label><span>小节数</span><input id="global-bars" type="number" min="4" max="256" /></label>
-    <label><span>时间吸附</span><select id="global-snap"><option value="0.25">1/4 拍</option><option value="0.5">1/2 拍</option><option value="1">1 拍</option><option value="2">2 拍</option><option value="0">关闭</option></select></label>
+    <label><span>时间吸附</span><select id="global-snap"><option value="0.03125">1/32 拍</option><option value="0.0625">1/16 拍</option><option value="0.125">1/8 拍</option><option value="0.25">1/4 拍</option><option value="0.5">1/2 拍</option><option value="1">1 拍</option><option value="2">2 拍</option><option value="0.08333333333333333">1/12 拍（三十二分三连音）</option><option value="0.16666666666666666">1/6 拍（十六分三连音）</option><option value="0.3333333333333333">1/3 拍（八分三连音）</option><option value="0.6666666666666666">2/3 拍（四分三连音）</option><option value="0">关闭</option></select></label>
+    <label class="swing-row"><span>Swing</span><input id="global-swing" type="checkbox" title="启用 Swing"><input id="global-swing-amount" type="range" min="0" max="100" step="1" value="50" title="Swing 强度"><output id="global-swing-value">50%</output></label>
     <label><span>轨道音量</span><input id="global-volume" type="range" min="0" max="1.25" step="0.01" /></label>
     <label><span>轨道静音</span><input id="global-mute" type="checkbox" /></label>
     <label><span>节拍器</span><input id="global-metronome" type="checkbox" /></label>
@@ -151,6 +154,7 @@
     </select></label><div id="scale-preset-list" class="tuning-preview-list"></div></section>
     <section id="scale-custom-panel" class="hidden">
       <label id="scale-edo-row" class="scale-mode-row"><span>等分</span><input id="scale-edo" type="number" min="2" max="9999" value="12"><b>EDO</b></label>
+      <label id="scale-harmonize-row" class="scale-harmonize-row hidden"><input id="scale-harmonize" type="checkbox"><span><strong>调和全部音符</strong><small>显示、播放与导出时把全部音符投影到完整 N-EDO 格点；原始纯律频率保持不变，关闭即可完整恢复</small></span></label>
       <div class="tuning-root-row"><strong id="scale-root-name">C</strong><span id="scale-root-value">1/1</span><small>基音</small></div>
       <div id="scale-interval-list" class="scale-interval-list"></div>
       <button id="scale-add-interval" class="source-picker tuning-add">＋ 添加音程</button>

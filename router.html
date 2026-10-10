@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
+  <meta name="color-scheme" content="dark" />
+  <title>纯律和音图 DAW</title>
+  <style>
+    html,body{height:100%;margin:0;background:#181820;color:#eee;font-family:"Segoe UI","Microsoft YaHei UI",sans-serif}
+    body{display:grid;place-items:center}.loading{color:#aaa9b6;font-size:13px;letter-spacing:.08em}
+  </style>
+</head>
+<body>
+  <div class="loading" role="status">正在载入纯律和音图…</div>
+  <script type="module">
+    const complete = new URLSearchParams(location.search).has('complete')
+    const pageUrl = new URL(complete ? './complete.html' : './single.html', location.href)
+    try {
+      const response = await fetch(pageUrl)
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const parsed = new DOMParser().parseFromString(await response.text(), 'text/html')
+      const scripts = [...parsed.querySelectorAll('script')]
+      scripts.forEach(script => script.remove())
+      for (const element of parsed.querySelectorAll('[href],[src]')) {
+        for (const attribute of ['href', 'src']) {
+          const value = element.getAttribute(attribute)
+          if (value) element.setAttribute(attribute, new URL(value, pageUrl).href)
+        }
+      }
+      document.documentElement.lang = parsed.documentElement.lang || 'zh-CN'
+      document.head.replaceChildren(...[...parsed.head.childNodes].map(node => document.importNode(node, true)))
+      document.body.replaceWith(document.importNode(parsed.body, true))
+      for (const source of scripts) {
+        const script = document.createElement('script')
+        for (const attribute of [...source.attributes]) {
+          const value = attribute.name === 'src' ? new URL(attribute.value, pageUrl).href : attribute.value
+          script.setAttribute(attribute.name, value)
+        }
+        script.textContent = source.textContent
+        document.body.append(script)
+      }
+    } catch (error) {
+      document.body.innerHTML = `<main style="max-width:560px;padding:24px"><h1 style="font-size:20px">页面载入失败</h1><p style="color:#aaa9b6">${String(error instanceof Error ? error.message : error)}</p><button onclick="location.reload()" style="padding:8px 16px">重试</button></main>`
+    }
+  </script>
+</body>
+</html>

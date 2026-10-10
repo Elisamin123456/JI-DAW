@@ -42,6 +42,7 @@ export interface InstrumentState {
   kind: 'builtin' | 'synth' | 'sf2'
   name: string
   builtinId?: string
+  synthId?: string
   path?: string
   programIndex: number
   programName?: string
@@ -71,6 +72,10 @@ export interface JiProject {
   bars: number
   loop: boolean
   metronome: boolean
+  /** 是否在播放与导出时应用八分音符 Swing。 */
+  swingEnabled: boolean
+  /** Swing 强度：0 为直拍，100 为最强延迟。 */
+  swingAmount: number
   /** 十二个半音相对所选主音的纯律比例，从主音到大七度排列。 */
   pitchRatios: Array<[number, number]>
   /** 决定十二音中哪些音参与音高吸附。 */
@@ -81,6 +86,8 @@ export interface JiProject {
   tuningSystem: TuningSystem
   /** EDO 模式的八度等分数。 */
   tuningEdo: number
+  /** 在 EDO 模式下，非破坏地把全部音符投影到完整 N-EDO 格点。 */
+  harmonizeRatiosToEdo: boolean
   /** 自由调律的音程列表；基音 1/1（或 0 步）始终隐含存在。 */
   tuningIntervals: TuningInterval[]
   tracks: Track[]

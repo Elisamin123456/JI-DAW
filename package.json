@@ -5,14 +5,18 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --open /index.source.html",
-    "build": "tsc --noEmit && vite build && node scripts/publish-root.mjs",
-    "preview": "vite preview"
+    "build": "node scripts/build-combined.mjs",
+    "build:single": "tsc --noEmit && vite build",
+    "build:complete": "tsc --noEmit -p ../tsconfig.json && vite build --config complete.vite.config.ts",
+    "preview": "vite preview",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "@breezystack/lamejs": "^1.2.7",
     "@gwegash/sf2-player": "^0.1.0"
   },
   "devDependencies": {
+    "patch-package": "^8.0.1",
     "typescript": "^5.9.2",
     "vite": "^7.1.7"
   }
