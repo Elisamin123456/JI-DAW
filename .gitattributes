@@ -1,0 +1,3 @@
+sound/Touhou.sf2.part* binary
+*.html text eol=lf
+complete-assets/*.js -whitespace

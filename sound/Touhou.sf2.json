@@ -1,0 +1,38 @@
+{
+  "size": 261192820,
+  "sha256": "c05372f76164aac916f9913550fab9d30d650cf205f000da27513ab98054b419",
+  "parts": [
+    {
+      "file": "Touhou.sf2.part01",
+      "size": 33554432
+    },
+    {
+      "file": "Touhou.sf2.part02",
+      "size": 33554432
+    },
+    {
+      "file": "Touhou.sf2.part03",
+      "size": 33554432
+    },
+    {
+      "file": "Touhou.sf2.part04",
+      "size": 33554432
+    },
+    {
+      "file": "Touhou.sf2.part05",
+      "size": 33554432
+    },
+    {
+      "file": "Touhou.sf2.part06",
+      "size": 33554432
+    },
+    {
+      "file": "Touhou.sf2.part07",
+      "size": 33554432
+    },
+    {
+      "file": "Touhou.sf2.part08",
+      "size": 26311796
+    }
+  ]
+}

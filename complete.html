@@ -6,8 +6,8 @@
   <meta name="color-scheme" content="dark" />
   <title>纯律和音图 DAW</title>
   <link rel="icon" href="./complete-assets/favicon-CqQr6oo1.ico" />
-  <script type="module" crossorigin src="./complete-assets/index-Dnkj2NWC.js"></script>
-  <link rel="stylesheet" crossorigin href="./complete-assets/index-DX561zEF.css">
+  <script type="module" crossorigin src="./complete-assets/index-DZ3ajpSB.js"></script>
+  <link rel="stylesheet" crossorigin href="./complete-assets/index-DX8i-N6W.css">
 </head>
 <body>
   <section id="track-view" class="view track-view">
@@ -20,8 +20,10 @@
         <button id="import-midi" class="text-button">导入 MIDI</button>
         <button id="export-midi" class="text-button">导出 MIDI</button>
         <button id="export-mp3" class="text-button">导出 MP3</button>
+        <button id="save-export-log" class="text-button">导出日志</button>
         <button id="import-track-code" class="text-button">导入码</button>
         <button id="save-project" class="primary-button">保存</button>
+        <button id="open-mixer" class="text-button">混音台</button>
       </nav>
     </header>
 
@@ -89,6 +91,7 @@
       <span id="piano-position" class="piano-position">001:01:000</span>
       <span class="toolbar-spacer"></span>
       <button id="piano-settings" class="toolbar-button" title="钢琴窗设置">⚙</button>
+      <button id="piano-mixer" class="toolbar-button" title="混音台">≋</button>
     </footer>
 
     <div id="piano-overlay" class="piano-overlay"></div>
@@ -102,6 +105,7 @@
         <button id="root-delete" class="menu-icon danger" title="删除">×</button>
       </div>
       <div id="root-edo-position" class="edo-position hidden"></div>
+      <label class="drum-note-row"><span>鼓件</span><select id="drum-note-voice" aria-label="音符鼓件"></select></label>
       <div class="volume-row"><button id="root-mute" class="mute-button">♪</button><input id="root-volume" type="range" min="0" max="100" value="80" /></div>
       <div class="note-color-row"><span>音符颜色</span><input id="root-color" type="color" value="#ffffff" aria-label="音符颜色"><button id="root-color-reset">默认</button></div>
       <div class="menu-divider"></div>
@@ -205,5 +209,9 @@
   </dialog>
   <div id="toast" class="toast"></div>
   <input id="fallback-file" class="hidden" type="file" />
+  <dialog id="mixer-dialog" class="mixer-dialog glass" aria-labelledby="mixer-title">
+    <header><div><strong id="mixer-title">混音台</strong><small>轨道电平 · 三段 EQ · 立体声房间混响</small></div><button id="close-mixer" class="text-button">关闭 ×</button></header>
+    <div id="mixer-channels" class="mixer-channels"></div>
+  </dialog>
 </body>
 </html>

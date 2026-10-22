@@ -1,5 +1,11 @@
 # JI-DAW Web
 
+仓库同时提供单轨模式 `single.html` 和完整多轨模式 `complete.html`，首页可选择进入。完整模式源码位于 `complete-src/`，可独立从本仓库构建。
+
+完整模式包含鼓轨、单鼓音量、SF2 鼓组、逐轨增益、声像、三段 EQ 和立体声房间混响。两套合成鼓的 snare 保留原始音色，仅提升输出增益 6 dB。音源菜单可直接加载 Touhou.sf2；为供静态站点加载，该音源以 `sound/Touhou.sf2.json` 清单和八个分块随仓库发布，浏览器会自动合并，音源数据保持一致。
+
+`npm run build:complete` 构建完整模式；`npm run build` 会构建并同步两种模式的部署入口和资源。更新原始 Touhou 文件后，可执行 `node scripts/split-soundfont.mjs /path/to/Touhou.sf2` 重新生成分块。
+
 纯浏览器运行的单轨纯律钢琴窗。保留任意分数音程、音程连接、十二音纯律吸附、富文本注释、内置采样与 SF2，并将工程、节拍和音色设置集中到钢琴窗。
 
 ## 使用

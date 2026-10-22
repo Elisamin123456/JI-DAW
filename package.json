@@ -7,7 +7,7 @@
     "dev": "vite --host 127.0.0.1 --open /index.source.html",
     "build": "node scripts/build-combined.mjs",
     "build:single": "tsc --noEmit && vite build",
-    "build:complete": "tsc --noEmit -p ../tsconfig.json && vite build --config complete.vite.config.ts",
+    "build:complete": "tsc --noEmit -p complete-src/tsconfig.json && vite build --config complete.vite.config.ts",
     "preview": "vite preview",
     "postinstall": "patch-package"
   },
